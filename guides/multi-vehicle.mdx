@@ -1,0 +1,249 @@
+---
+title: "Multi-Vehicle Coordination"
+description: "Coordinate multiple vehicles using ZMQ: start the proxy, assign identifiers, and use ZmqStateMachine to send state transitions and query fields across runners."
+---
+
+aerpawlib uses ZMQ pub/sub messaging to coordinate multiple vehicle scripts running as separate processes. A central **proxy** relays messages between runners; each runner subscribes to messages addressed to its unique identifier.
+
+## Architecture
+
+```
+ ┌──────────────────────────────────────────────────────┐
+ │                    ZMQ Proxy                          │
+ │   IN port: 5570  (runners PUBLISH to this)           │
+ │   OUT port: 5571 (runners SUBSCRIBE to this)         │
+ └─────────────────────┬────────────────────────────────┘
+                       │
+       ┌───────────────┴───────────────┐
+       ▼                               ▼
+  leader process                 follower process
+  --zmq-identifier leader        --zmq-identifier follower
+  --zmq-proxy-server 127.0.0.1   --zmq-proxy-server 127.0.0.1
+```
+
+Each process runs a separate vehicle. They communicate by sending messages through the proxy. The proxy must be started before any runners.
+
+## Step 1: Start the ZMQ proxy
+
+Run the proxy in its own terminal. It runs indefinitely.
+
+```bash
+aerpawlib --run-proxy
+```
+
+## Step 2: Run each vehicle script
+
+Start one `aerpawlib` process per vehicle. Provide `--zmq-identifier` (unique per vehicle) and `--zmq-proxy-server` (the host running the proxy).
+
+<CodeGroup>
+
+```bash Leader
+aerpawlib \
+  --script examples/v1/zmq_runner/leader.py \
+  --conn udp://127.0.0.1:14550 \
+  --vehicle drone \
+  --zmq-identifier leader \
+  --zmq-proxy-server 127.0.0.1 \
+  --no-aerpaw-environment
+```
+
+```bash Follower
+aerpawlib \
+  --script examples/v1/zmq_runner/follower.py \
+  --conn udp://127.0.0.1:14551 \
+  --vehicle drone \
+  --zmq-identifier follower \
+  --zmq-proxy-server 127.0.0.1 \
+  --no-aerpaw-environment
+```
+
+</CodeGroup>
+
+<Warning>
+The ZMQ proxy must be running before any vehicle scripts start. Scripts check proxy reachability at startup and will log a warning if the proxy is not available.
+</Warning>
+
+## ZmqStateMachine
+
+Subclass `ZmqStateMachine` (which extends `StateMachine`) to enable ZMQ communication. The two key methods for inter-runner coordination are:
+
+| Method | Description |
+|--------|-------------|
+| `await self.transition_runner(identifier, state_name)` | Command another runner to transition to a named state |
+| `await self.query_field(identifier, field)` | Request the current value of a field exposed by another runner |
+
+### Exposing states with @expose_zmq
+
+Decorate a `@state` method with `@expose_zmq(name)` to allow other runners to trigger a transition into that state:
+
+```python
+from aerpawlib.v1.runner import ZmqStateMachine, state, expose_zmq
+
+class FollowRunner(ZmqStateMachine):
+    @state(name="launch_wait", first=True)
+    async def state_start(self, _):
+        # Idle loop: waits until leader commands a transition
+        return "launch_wait"
+
+    @state(name="takeoff")
+    async def state_takeoff(self, drone):
+        print("taking off")
+        await drone.takeoff(10)
+        return "fly_to_waypoint"
+
+    @state(name="fly_to_waypoint")
+    async def state_waypoint(self, drone):
+        await drone.goto_coordinates(drone.position + VectorNED(20, 0))
+        await self.transition_runner("leader", "waypoint_ping")
+        return "waypoint_wait"
+
+    @state(name="waypoint_wait")
+    async def state_wait_waypoint(self, _):
+        return "waypoint_wait"
+
+    @state(name="land")
+    async def state_land(self, drone):
+        await drone.land()
+        return None
+```
+
+### Triggering transitions from the leader
+
+```python
+class LeaderRunner(ZmqStateMachine):
+    @state(name="launch", first=True)
+    async def state_start(self, _):
+        await sleep(10)
+        return "start_ping"
+
+    @state(name="start_ping")
+    async def state_start_ping(self, _):
+        # Tell the follower to take off
+        await self.transition_runner("follower", "takeoff")
+        return "wait_for_waypoint"
+
+    @state(name="wait_for_waypoint")
+    async def state_wait_waypoint(self, _):
+        # Idle loop: waits until follower calls transition_runner("leader", "waypoint_ping")
+        return "wait_for_waypoint"
+
+    @state(name="waypoint_ping")
+    async def state_ping_waypoint(self, _):
+        # do work, then command follower to RTL
+        await self.transition_runner("follower", "rtl")
+        return "wait_for_rtl"
+
+    @state(name="wait_for_rtl")
+    async def state_wait_rtl(self, _):
+        return "wait_for_rtl"
+
+    @state(name="last_ping")
+    async def state_last_ping(self, _):
+        await self.transition_runner("follower", "land")
+        return None
+```
+
+### Exposing and querying fields with @expose_field_zmq
+
+Use `@expose_field_zmq(name)` to expose a value from one runner that another can pull with `query_field`:
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.runner import ZmqStateMachine, state, expose_field_zmq
+
+    class SensorRunner(ZmqStateMachine):
+        @expose_field_zmq("altitude")
+        async def get_altitude(self, vehicle):
+            return vehicle.position.alt
+
+        @expose_field_zmq("battery")
+        async def get_battery(self, vehicle):
+            return vehicle.battery.level
+    ```
+
+    Querying from another runner:
+
+    ```python
+    class CoordinatorRunner(ZmqStateMachine):
+        @state(name="check", first=True)
+        async def check(self, _):
+            alt = await self.query_field("sensor-drone", "altitude")
+            print(f"Sensor drone altitude: {alt}m")
+            return None
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2 import ZmqStateMachine, Drone, state, expose_zmq, expose_field_zmq
+
+    class RemoteMission(ZmqStateMachine):
+        def __init__(self):
+            super().__init__()
+
+        @expose_zmq("fly")
+        @state(name="fly", first=True)
+        async def fly(self, drone: Drone):
+            await drone.takeoff(altitude=10)
+            return "land"
+
+        @state(name="land")
+        async def land(self, drone: Drone):
+            await drone.land()
+            return None
+
+        @expose_field_zmq("altitude")
+        async def get_altitude(self, drone: Drone):
+            return drone.position.alt
+    ```
+
+    Querying:
+
+    ```python
+    alt = await self.query_field("other-vehicle", "altitude")
+    await self.transition_runner("other-vehicle", "land")
+    ```
+  </Tab>
+</Tabs>
+
+`query_field` blocks until the remote runner replies or `timeout` seconds elapse (default: 30 s). If the timeout is exceeded, `asyncio.TimeoutError` is raised.
+
+## Running on separate machines
+
+When vehicles run on different machines, set `--zmq-proxy-server` to the IP of the machine running `aerpawlib --run-proxy`.
+
+```bash
+# Machine A: proxy
+aerpawlib --run-proxy
+
+# Machine B: leader
+aerpawlib --script leader.py --conn ... --vehicle drone \
+  --zmq-identifier leader --zmq-proxy-server 192.168.1.10
+
+# Machine C: follower
+aerpawlib --script follower.py --conn ... --vehicle drone \
+  --zmq-identifier follower --zmq-proxy-server 192.168.1.10
+```
+
+## Avoiding port conflicts
+
+When running multiple vehicles on the same host, use a unique `--mavsdk-port` per process:
+
+```bash
+aerpawlib --script leader.py --conn udpin://127.0.0.1:14550 --vehicle drone \
+  --mavsdk-port 50051 --zmq-identifier leader --zmq-proxy-server 127.0.0.1
+
+aerpawlib --script follower.py --conn udpin://127.0.0.1:14551 --vehicle drone \
+  --mavsdk-port 50052 --zmq-identifier follower --zmq-proxy-server 127.0.0.1
+```
+
+## ZMQ proxy ports
+
+The proxy binds two fixed ports:
+
+| Port | Direction | Description |
+|------|-----------|-------------|
+| `5570` | IN | Runners publish messages here |
+| `5571` | OUT | Runners subscribe to this |
+
+These are not configurable via CLI; they are defined in the library constants.

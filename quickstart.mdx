@@ -1,80 +1,251 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Write and run your first autonomous drone mission in under five minutes."
 ---
 
-## Get started in three steps
+This guide walks you from a bare Python file to a drone flying a square pattern
+in SITL simulation. It uses the **v1 API** — the default and most widely used
+interface in aerpawlib.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+- aerpawlib installed with dev/SITL extras (see [Installation](/installation))
+- ArduPilot SITL configured (`aerpawlib-setup-sitl` completed)
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+## Write your first mission
 
-### Step 2: Deploy your changes
+<Steps>
+  <Step title="Create a mission file">
+    Create `my_mission.py` in your working directory:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```python my_mission.py
+    from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    class MyMission(BasicRunner):
+        @entrypoint
+        async def run(self, vehicle):
+            await vehicle.takeoff(10)
+            for wp in [
+                Coordinate(35.7275, -78.6960, 10),
+                Coordinate(35.7280, -78.6955, 10),
+            ]:
+                await vehicle.goto_coordinates(wp)
+            await vehicle.land()
+    ```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    This is a complete, runnable mission. The four key pieces are explained
+    below.
+  </Step>
 
-### Step 3: Go live
+  <Step title="Start ArduPilot SITL">
+    In a separate terminal, start the SITL simulator:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    ```bash
+    # Copter SITL on the default MAVLink UDP port
+    sim_vehicle.py -v ArduCopter --out udp:127.0.0.1:14550 --console
+    ```
 
-## Next steps
+    Wait until the console shows `APM: EKF2 IMU0 is using GPS` and the vehicle
+    reports a 3D GPS fix before continuing.
 
-Now that you have your docs running, explore these key features:
+    <Warning>
+      aerpawlib will not arm the vehicle until it reaches an armable state. A
+      missing GPS fix is the most common reason for the script to hang at
+      startup.
+    </Warning>
+  </Step>
 
-<CardGroup cols={2}>
+  <Step title="Run the mission">
+    ```bash
+    aerpawlib --script my_mission.py --conn udp://127.0.0.1:14550 --vehicle drone
+    ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    aerpawlib will connect, wait for the vehicle to become armable, arm it, then
+    execute your `run` method. When `vehicle.land()` returns, the process exits
+    cleanly.
+  </Step>
+</Steps>
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+## How the code works
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+### Imports
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+```python
+from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+```
 
-</CardGroup>
+| Name | What it is |
+|---|---|
+| `BasicRunner` | Base class for linear, single-entrypoint missions |
+| `entrypoint` | Decorator that marks the method aerpawlib calls first |
+| `Drone` | Vehicle object providing all flight commands (passed in by the framework) |
+| `Coordinate` | Lat/lon/alt position used by `goto_coordinates` |
+
+### Runner class
+
+Every mission is a class that subclasses one of the framework runner types.
+aerpawlib discovers this class automatically at runtime — you do not need to
+instantiate it yourself.
+
+```python
+class MyMission(BasicRunner):
+    ...
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  There must be exactly one `Runner` subclass per script file. Defining more
+  than one raises an error at startup.
 </Note>
+
+### The `@entrypoint` method
+
+```python
+@entrypoint
+async def run(self, vehicle):
+    ...
+```
+
+The method decorated with `@entrypoint` is the mission body. It receives the
+connected vehicle as its only argument. The method is `async` — use `await` on
+every vehicle command.
+
+### Flight commands
+
+```python
+await vehicle.takeoff(10)                     # arm and climb to 10 m AGL
+await vehicle.goto_coordinates(Coordinate(...))  # fly to a lat/lon/alt
+await vehicle.land()                          # descend and disarm
+```
+
+Each command is awaited, so execution proceeds sequentially by default.
+
+## Real example: square flight
+
+The `examples/v1/basic_example.py` file included in the repository flies a
+10 m × 10 m square using `VectorNED` offsets instead of absolute coordinates:
+
+```python examples/v1/basic_example.py
+from aerpawlib.v1.runner import BasicRunner, entrypoint
+from aerpawlib.v1.util import VectorNED
+from aerpawlib.v1.vehicle import Drone
+
+
+class SquareFlight(BasicRunner):
+    """Fly in a square pattern."""
+
+    @entrypoint
+    async def run(self, drone: Drone):
+        takeoff_altitude = 10  # meters
+        square_size = 10       # meters
+
+        await drone.takeoff(takeoff_altitude)
+        start_position = drone.position
+
+        waypoints = [
+            ("North", VectorNED(square_size, 0, 0)),
+            ("East",  VectorNED(0, square_size, 0)),
+            ("South", VectorNED(-square_size, 0, 0)),
+            ("West",  VectorNED(0, -square_size, 0)),
+        ]
+
+        current_position = start_position
+        for direction, offset in waypoints:
+            target = current_position + offset
+            await drone.goto_coordinates(target)
+            current_position = target
+
+        await drone.goto_coordinates(start_position)
+        await drone.land()
+```
+
+Run it directly:
+
+```bash
+aerpawlib --api-version v1 --script examples/v1/basic_example.py \
+    --vehicle drone --conn udp:127.0.0.1:14550
+```
+
+## Connection strings
+
+Pass any MAVLink connection string to `--conn`:
+
+<CodeGroup>
+
+```bash UDP (SITL default)
+aerpawlib --script my_mission.py --conn udp://127.0.0.1:14550 --vehicle drone
+```
+
+```bash UDP inbound
+aerpawlib --script my_mission.py --conn udpin://127.0.0.1:14550 --vehicle drone
+```
+
+```bash Serial port (real hardware)
+aerpawlib --script my_mission.py --conn /dev/ttyACM0 --vehicle drone
+```
+
+```bash TCP
+aerpawlib --script my_mission.py --conn tcp://192.168.1.10:5760 --vehicle drone
+```
+
+</CodeGroup>
+
+## Running with a config file
+
+Instead of passing all flags on the command line, store them in a JSON file:
+
+```json mission.json
+{
+  "script": "examples/v1/basic_example.py",
+  "conn": "udp://127.0.0.1:14550",
+  "vehicle": "drone",
+  "verbose": true
+}
+```
+
+```bash
+aerpawlib --config mission.json
+```
+
+Any argument supplied on the command line overrides the corresponding key in
+the config file.
+
+## Running on AERPAW
+
+When your script runs on the real AERPAW platform rather than SITL, two things
+change:
+
+<Warning>
+  On AERPAW, the vehicle will **not** arm automatically. The safety pilot must
+  physically arm the vehicle before aerpawlib proceeds past the pre-arm wait.
+  Do not assume the mission has started until you see confirmation in the logs.
+</Warning>
+
+- Do **not** pass `--no-aerpaw-environment`. Without this flag, aerpawlib
+  connects to the AERPAW platform services (OEO logging, checkpoints).
+- The safety checker server is started automatically on port 14580. aerpawlib
+  will refuse to proceed if it cannot reach it.
+
+For local SITL runs, always add `--no-aerpaw-environment` to skip the platform
+connection:
+
+```bash
+aerpawlib --script my_mission.py --conn udp://127.0.0.1:14550 --vehicle drone \
+    --no-aerpaw-environment
+```
+
+## CLI reference (common flags)
+
+| Flag | Description |
+|---|---|
+| `--script` | Path to your Python mission file |
+| `--conn` | MAVLink connection string |
+| `--vehicle` | `drone`, `rover`, `generic`, or `none` |
+| `--api-version` | `v1` (default) or `v2` |
+| `--no-aerpaw-environment` | Standalone/SITL mode — skip AERPAW platform connection |
+| `--skip-init` | Skip pre-arm wait |
+| `--skip-rtl` | Do not auto-RTL when the script ends |
+| `-v` / `--verbose` | DEBUG logging |
+| `-q` / `--quiet` | WARNING logging only |
+| `--log-file` | Write logs to a file in addition to the console |
+| `--conn-timeout` | Seconds to wait for initial connection (default: 30) |
+| `--config` | JSON config file (keys are CLI flag names) |

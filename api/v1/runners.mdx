@@ -1,0 +1,388 @@
+---
+title: "Runners"
+description: "Execution frameworks for aerpawlib scripts — BasicRunner, StateMachine, ZmqStateMachine and all decorators."
+---
+
+Runners are the execution models that drive your mission script. All runners extend the `Runner` base class and are launched by the aerpawlib infrastructure after vehicle connection and initialization.
+
+## Runner
+
+The abstract base class. Extend this only if you need a fully custom execution model.
+
+```python
+from aerpawlib.v1 import Runner
+
+class MyRunner(Runner):
+    async def run(self, vehicle):
+        ...  # your logic here
+
+    def initialize_args(self, args):
+        ...  # parse extra CLI arguments
+
+    def cleanup(self):
+        ...  # called on exit
+```
+
+### Methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `run` | `async run(self, vehicle: Vehicle) -> None` | Core mission logic. Called after vehicle is initialized. |
+| `initialize_args` | `initialize_args(self, args: List[str]) -> None` | Parse extra command-line arguments passed to the script. |
+| `cleanup` | `cleanup(self) -> None` | Called when the script exits (including on error). |
+
+---
+
+## BasicRunner
+
+`BasicRunner` runs a single `async` function decorated with `@entrypoint`. This is the simplest execution model and the right choice for linear missions.
+
+```python
+from aerpawlib.v1 import BasicRunner, entrypoint
+```
+
+### `@entrypoint`
+
+```python
+def entrypoint(func)
+```
+
+Mark a method as the entry point of a `BasicRunner`. There must be **exactly one** method decorated with `@entrypoint` per class. The method must be `async`.
+
+```python
+class MyMission(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        await drone.takeoff(10)
+        await drone.land()
+```
+
+**Raises** `NoEntrypointError` if no `@entrypoint` is found at runtime.
+
+**Raises** `StateMachineError` if multiple `@entrypoint` decorators are found.
+
+---
+
+## StateMachine
+
+`StateMachine` drives missions as a sequence of named **states**. Each state is an `async` function that returns the name of the next state to transition to, or `None` to stop.
+
+```python
+from aerpawlib.v1 import StateMachine, state, timed_state, background, at_init
+```
+
+### `@state`
+
+```python
+def state(name: str, first: bool = False)
+```
+
+Decorate an `async` method as a named state. The method must return the name of the next state (a `str`), or `None` / `return` nothing to stop the machine.
+
+<ParamField path="name" type="str" required>
+  Unique name for this state. Cannot be empty.
+</ParamField>
+
+<ParamField path="first" type="bool">
+  Set to `True` on exactly one state to mark it as the initial state. Defaults to `False`.
+</ParamField>
+
+**Raises** `NoInitialStateError` if no state has `first=True`.
+
+**Raises** `MultipleInitialStatesError` if more than one state has `first=True`.
+
+**Raises** `InvalidStateNameError` if `name` is an empty string.
+
+```python
+class PatrolMission(StateMachine):
+    @state(name="takeoff", first=True)
+    async def takeoff(self, drone: Drone):
+        await drone.takeoff(10)
+        return "patrol"
+
+    @state(name="patrol")
+    async def patrol(self, drone: Drone):
+        target = Coordinate(35.7275, -78.6960, 10)
+        await drone.goto_coordinates(target)
+        return "land"
+
+    @state(name="land")
+    async def land_state(self, drone: Drone):
+        await drone.land()
+        return None  # stop the machine
+```
+
+### `@timed_state`
+
+```python
+def timed_state(name: str, duration: float, loop: bool = False, first: bool = False)
+```
+
+Decorate an `async` method as a timed state. The state runs for at least `duration` seconds before the machine reads the returned next-state name.
+
+<ParamField path="name" type="str" required>
+  Unique name for this state.
+</ParamField>
+
+<ParamField path="duration" type="float" required>
+  Minimum time in seconds to remain in this state.
+</ParamField>
+
+<ParamField path="loop" type="bool">
+  If `True`, the method is called repeatedly during the `duration` window. Useful for periodic telemetry logging. Defaults to `False`.
+</ParamField>
+
+<ParamField path="first" type="bool">
+  Mark this as the initial state. Defaults to `False`.
+</ParamField>
+
+```python
+class HoverMission(StateMachine):
+    @state(name="takeoff", first=True)
+    async def takeoff(self, drone: Drone):
+        await drone.takeoff(10)
+        return "hover"
+
+    @timed_state(name="hover", duration=30.0, loop=True)
+    async def hover(self, drone: Drone):
+        # called every STATE_MACHINE_DELAY_S while hovering
+        print(f"Alt: {drone.position.alt:.1f} m  Heading: {drone.heading:.0f}°")
+        return "land"
+
+    @state(name="land")
+    async def land_state(self, drone: Drone):
+        await drone.land()
+```
+
+### `@background`
+
+```python
+def background(func)
+```
+
+Run an `async` method concurrently with the state machine. Background tasks start when `run()` is called and are cancelled when the machine stops. If a background task raises an exception it is logged and the task is **restarted** after a 0.5 s backoff.
+
+```python
+import asyncio
+
+class MonitoredMission(StateMachine):
+    @state(name="start", first=True)
+    async def start(self, drone: Drone):
+        await drone.takeoff(10)
+        return "fly"
+
+    @state(name="fly")
+    async def fly(self, drone: Drone):
+        await drone.goto_coordinates(Coordinate(35.7275, -78.6960, 10))
+        return "land"
+
+    @state(name="land")
+    async def land_state(self, drone: Drone):
+        await drone.land()
+
+    @background
+    async def battery_monitor(self, drone: Drone):
+        while True:
+            if drone.battery.level < 20:
+                print(f"WARNING: Low battery ({drone.battery.level}%)")
+            await asyncio.sleep(5)
+```
+
+### `@at_init`
+
+```python
+def at_init(func)
+```
+
+Run an `async` method **before** the vehicle is armed (during initialization). Useful for loading waypoints or connecting to external services. All `@at_init` tasks run concurrently via `asyncio.gather` before any state executes.
+
+```python
+class MissionWithInit(StateMachine):
+    @at_init
+    async def load_waypoints(self, drone: Drone):
+        self.waypoints = read_from_plan("mission.plan")
+
+    @state(name="fly", first=True)
+    async def fly(self, drone: Drone):
+        for wp in self.waypoints:
+            await drone.goto_coordinates(get_location_from_waypoint(wp))
+        return None
+```
+
+### `StateMachine.stop()`
+
+```python
+self.stop()
+```
+
+Stop the state machine after the current state completes. Equivalent to returning `None` from a state.
+
+---
+
+## ZmqStateMachine
+
+`ZmqStateMachine` extends `StateMachine` with the ability to be remotely controlled over ZMQ. States can be triggered from other processes, and field values can be queried across processes.
+
+```python
+from aerpawlib.v1 import ZmqStateMachine, state, expose_zmq, expose_field_zmq, background
+```
+
+### Initialization
+
+Before running, call `_initialize_zmq_bindings` to configure the ZMQ connection. This is typically done in `initialize_args`:
+
+```python
+class MyMachine(ZmqStateMachine):
+    def initialize_args(self, args):
+        # called by aerpawlib with extra CLI args
+        # args: ["--zmq-identifier", "drone1", "--zmq-proxy-server", "127.0.0.1"]
+        ...
+```
+
+Or call it directly:
+
+```python
+machine._initialize_zmq_bindings(
+    vehicle_identifier="drone1",
+    proxy_server_addr="127.0.0.1",
+)
+```
+
+<Note>
+The ZMQ proxy (`run_zmq_proxy()`) must be running in a separate process before `ZmqStateMachine.run()` is called. See the [ZMQ page](/api/v1/zmq) for details.
+</Note>
+
+### `@expose_zmq`
+
+```python
+def expose_zmq(name: str)
+```
+
+Expose a `@state` or `@timed_state` method for remote transitions via ZMQ. Another `ZmqStateMachine` instance can trigger a transition into this state by calling `transition_runner(identifier, name)`.
+
+<ParamField path="name" type="str" required>
+  The ZMQ name under which this state is advertised. Must match the string used in `transition_runner`.
+</ParamField>
+
+```python
+class FollowerDrone(ZmqStateMachine):
+    @state(name="idle", first=True)
+    async def idle(self, drone: Drone):
+        await asyncio.sleep(1)
+        return "idle"  # loop until triggered remotely
+
+    @expose_zmq(name="start_mission")
+    @state(name="mission")
+    async def mission(self, drone: Drone):
+        await drone.goto_coordinates(Coordinate(35.7275, -78.6960, 10))
+        return "idle"
+```
+
+### `@expose_field_zmq`
+
+```python
+def expose_field_zmq(name: str)
+```
+
+Expose an `async` method as a queryable field. Other `ZmqStateMachine` instances can retrieve the return value by calling `query_field(identifier, name)`.
+
+<ParamField path="name" type="str" required>
+  The ZMQ field name used in `query_field`.
+</ParamField>
+
+```python
+class LeaderDrone(ZmqStateMachine):
+    @expose_field_zmq(name="position")
+    async def get_position(self, drone: Drone):
+        pos = drone.position
+        return {"lat": pos.lat, "lon": pos.lon, "alt": pos.alt}
+```
+
+### `transition_runner`
+
+```python
+await machine.transition_runner(identifier, state)
+```
+
+Send a ZMQ state-transition request to another `ZmqStateMachine`.
+
+<ParamField path="identifier" type="str" required>
+  The `vehicle_identifier` of the target machine.
+</ParamField>
+
+<ParamField path="state" type="str" required>
+  The ZMQ name of the state to trigger (as given to `@expose_zmq`).
+</ParamField>
+
+### `query_field`
+
+```python
+value = await machine.query_field(identifier, field, timeout=30.0)
+```
+
+Request a field value from another `ZmqStateMachine` and wait for the response.
+
+<ParamField path="identifier" type="str" required>
+  The `vehicle_identifier` of the target machine.
+</ParamField>
+
+<ParamField path="field" type="str" required>
+  The ZMQ field name (as given to `@expose_field_zmq`).
+</ParamField>
+
+<ParamField path="timeout" type="float">
+  Maximum seconds to wait for a reply. Defaults to `30.0`. Raises `asyncio.TimeoutError` if the target does not reply.
+</ParamField>
+
+---
+
+## Full StateMachine example
+
+```python
+from aerpawlib.v1 import (
+    Drone, Coordinate, StateMachine,
+    state, timed_state, background, at_init,
+    read_from_plan, get_location_from_waypoint,
+)
+import asyncio
+
+class PatrolMission(StateMachine):
+    def __init__(self):
+        self.waypoints = []
+        self.index = 0
+
+    @at_init
+    async def load_plan(self, drone: Drone):
+        self.waypoints = read_from_plan("patrol.plan")
+
+    @state(name="arm_and_takeoff", first=True)
+    async def arm_and_takeoff(self, drone: Drone):
+        await drone.takeoff(15)
+        return "navigate"
+
+    @state(name="navigate")
+    async def navigate(self, drone: Drone):
+        if self.index >= len(self.waypoints):
+            return "rtl"
+        wp = self.waypoints[self.index]
+        await drone.goto_coordinates(
+            get_location_from_waypoint(wp),
+            tolerance=3,
+        )
+        self.index += 1
+        return "navigate"
+
+    @timed_state(name="rtl", duration=0)
+    async def rtl(self, drone: Drone):
+        await drone.return_to_launch()
+        return None
+
+    @background
+    async def log_telemetry(self, drone: Drone):
+        while True:
+            print(
+                f"[{drone.position.lat:.5f}, {drone.position.lon:.5f}] "
+                f"alt={drone.position.alt:.1f}m  bat={drone.battery.level}%"
+            )
+            await asyncio.sleep(2)
+```

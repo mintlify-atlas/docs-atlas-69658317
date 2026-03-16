@@ -1,0 +1,761 @@
+---
+title: "ZMQ multi-vehicle coordination"
+description: "How to coordinate multiple drones with the ZMQ message bus — leader/follower and the three-process preplanned orbit mission."
+---
+
+The `ZmqStateMachine` runner extends `StateMachine` with two extra capabilities:
+
+- **`transition_runner(identifier, state_name)`** — remotely move another vehicle's state machine into a named state.
+- **`expose_field_zmq` / `query_field`** — expose a value from one vehicle's script so another can read it over the network.
+
+A lightweight ZMQ proxy process (`aerpawlib --run-proxy`) relays messages between vehicles. Every vehicle script must pass `--zmq-identifier` (a unique name) and `--zmq-proxy-server` (the proxy host IP).
+
+<Warning>
+  Always start the ZMQ proxy **before** launching any vehicle scripts. Scripts that cannot reach the proxy will stall waiting for a connection.
+</Warning>
+
+## Architecture
+
+```
+┌────────────┐     ZMQ pub/sub     ┌──────────────┐
+│   leader   │ ──────────────────► │  zmq proxy   │
+│  (drone 1) │ ◄────────────────── │ --run-proxy  │
+└────────────┘                     └──────┬───────┘
+                                          │
+                                   ZMQ pub/sub
+                                          │
+                                   ┌──────▼───────┐
+                                   │   follower   │
+                                   │  (drone 2)   │
+                                   └──────────────┘
+```
+
+Each vehicle runs one script. The proxy is not a vehicle — it has no MAVLink connection. It simply routes messages by ZMQ identifier.
+
+---
+
+## Leader/follower (`zmq_runner/`)
+
+Two drones. The leader measures ping latency and issues state transitions to the follower at the right moments. The follower flies to a waypoint and returns when commanded.
+
+<CodeGroup>
+
+```python leader.py
+# leader script
+
+import re
+
+from aerpawlib.v1.runner import (
+    ZmqStateMachine,
+    at_init,
+    background,
+    in_background,
+    sleep,
+    state,
+    timed_state,
+)
+from aerpawlib.v1.util import Coordinate, Waypoint, read_from_plan_complete
+from aerpawlib.v1.vehicle import Drone
+
+from aerpawlib.v1.external import ExternalProcess
+
+target_ip = "127.0.0.1"
+
+
+class LeaderRunner(ZmqStateMachine):
+    _ping_regex = re.compile(
+        r".+icmp_seq=(?P<seq>\d+).+time=(?P<time>\d\.\d+) ms"
+    )
+
+    async def _ping_latency(self, address: str, count: int):
+        """
+        This function will calculate the average latency to `address` by using
+        ping and looking at the time in the output. This makes use of native
+        aerpawlib tooling (ExternalProcess)
+        """
+        ping = ExternalProcess("ping", params=["-c", str(count), address])
+        await ping.start()
+        latencies = []
+        # repeatedly wait for ping to produce output w/ icmp_seq field
+        buff = 1
+        while buff:
+            buff = await ping.wait_until_output(r"icmp_seq=")
+            if not buff:
+                break
+            ping_re_match = self._ping_regex.match(buff[-1])
+            if ping_re_match is None:
+                continue
+            latencies.append(float(ping_re_match.group("time")))
+            if ping_re_match.group("seq") == str(count):
+                break
+        if not latencies:
+            raise RuntimeError(
+                f"Ping to {address} produced no parseable output (process may have exited early)"
+            )
+        return sum(latencies) / len(latencies)
+
+    @state(name="launch", first=True)
+    async def state_start(self, _):
+        print("waiting to start")
+        await sleep(10)
+        return "start_ping"
+
+    @state(name="start_ping")
+    async def state_start_ping(self, _):
+        p = await self._ping_latency(target_ip, 5)
+        print(f"ping_result: {p}")
+        await self.transition_runner("follower", "takeoff")
+        return "wait_for_waypoint"
+
+    @state(name="wait_for_waypoint")
+    async def state_wait_waypoint(self, _):
+        return "wait_for_waypoint"
+
+    @state(name="waypoint_ping")
+    async def state_ping_waypoint(self, _):
+        p = await self._ping_latency(target_ip, 5)
+        print(f"ping_result: {p}")
+
+        await self.transition_runner("follower", "rtl")
+
+        return "wait_for_rtl"
+
+    @state(name="wait_for_rtl")
+    async def state_wait_rtl(self, _):
+        return "wait_for_rtl"
+
+    @state(name="last_ping")
+    async def state_last_ping(self, _):
+        p = await self._ping_latency(target_ip, 5)
+        print(f"ping_result: {p}")
+        await self.transition_runner("follower", "land")
+        return
+```
+
+```python follower.py
+# follower script
+
+from aerpawlib.v1.runner import (
+    ZmqStateMachine,
+    at_init,
+    background,
+    in_background,
+    sleep,
+    state,
+    timed_state,
+)
+from aerpawlib.v1.util import (
+    Coordinate,
+    VectorNED,
+    Waypoint,
+    read_from_plan_complete,
+)
+from aerpawlib.v1.vehicle import Drone
+
+from aerpawlib.v1.external import ExternalProcess
+
+
+class FollowRunner(ZmqStateMachine):
+    @state(name="launch_wait", first=True)
+    async def state_start(self, _):
+        return "launch_wait"
+
+    @state(name="takeoff")
+    async def state_takeoff(self, drone):
+        print("taking off")
+        await drone.takeoff(10)
+        print("taken off")
+        return "fly_to_waypoint"
+
+    @state(name="fly_to_waypoint")
+    async def state_waypoint(self, drone):
+        await drone.goto_coordinates(drone.position + VectorNED(20, 0))
+        await sleep(5)
+        await self.transition_runner("leader", "waypoint_ping")
+        return "waypoint_wait"
+
+    @state(name="waypoint_wait")
+    async def state_wait_waypoint(self, _):
+        return "waypoint_wait"
+
+    @state(name="rtl")
+    async def state_rtl(self, drone):
+        home_coords = Coordinate(
+            drone.home_coords.lat, drone.home_coords.lon, drone.position.alt
+        )
+        await drone.goto_coordinates(home_coords)
+        await sleep(5)
+        await self.transition_runner("leader", "last_ping")
+        return "wait_last_ping"
+
+    @state("wait_last_ping")
+    async def state_wait_last_ping(self, _):
+        return "wait_last_ping"
+
+    @state("land")
+    async def state_land(self, drone):
+        await drone.land()
+        print("done!")
+        return
+```
+
+</CodeGroup>
+
+### How the coordination works
+
+| Step | Leader | Follower |
+|------|--------|----------|
+| 1 | Enters `launch`, waits 10 s | Enters `launch_wait`, polls itself |
+| 2 | Measures ping → calls `transition_runner("follower", "takeoff")` | Receives transition, takes off, flies 20 m north |
+| 3 | Enters `wait_for_waypoint`, polls itself | After arriving, calls `transition_runner("leader", "waypoint_ping")` |
+| 4 | Enters `waypoint_ping`, measures ping → calls `transition_runner("follower", "rtl")` | Returns to home |
+| 5 | Enters `wait_for_rtl`, polls itself | After RTL, calls `transition_runner("leader", "last_ping")` |
+| 6 | Enters `last_ping`, measures ping → calls `transition_runner("follower", "land")` | Lands |
+
+**Polling states** (`launch_wait`, `wait_for_waypoint`, `wait_for_rtl`, `wait_last_ping`) return their own name immediately. The state machine re-enters them on the next tick, effectively busy-waiting until the other vehicle sends a `transition_runner` call.
+
+<Steps>
+  <Step title="Start the ZMQ proxy">
+    Open a dedicated terminal and run:
+
+    ```bash
+    aerpawlib --run-proxy
+    ```
+
+    Leave this terminal running for the entire mission.
+  </Step>
+  <Step title="Start two SITL instances">
+    Launch one simulator on port `14550` and a second on `14551`.
+  </Step>
+  <Step title="Run the leader">
+    ```bash
+    aerpawlib \
+        --script examples/v1/zmq_runner/leader.py \
+        --conn udp://127.0.0.1:14550 \
+        --vehicle drone \
+        --zmq-identifier leader \
+        --zmq-proxy-server 127.0.0.1
+    ```
+  </Step>
+  <Step title="Run the follower">
+    ```bash
+    aerpawlib \
+        --script examples/v1/zmq_runner/follower.py \
+        --conn udp://127.0.0.1:14551 \
+        --vehicle drone \
+        --zmq-identifier follower \
+        --zmq-proxy-server 127.0.0.1
+    ```
+  </Step>
+</Steps>
+
+<Info>
+  `--zmq-identifier` must be unique across all scripts connected to the same proxy. Use the same strings your scripts pass to `transition_runner` — here `"leader"` and `"follower"`.
+</Info>
+
+---
+
+## Three-process preplanned orbit (`zmq_preplanned_orbit/`)
+
+A more complex mission: two drones and a ground coordinator process. The tracer follows a `.plan` file; the orbiter circles the tracer at each waypoint. A ground coordinator script (no vehicle, no MAVLink connection) orchestrates both drones.
+
+### Roles
+
+| Process | ZMQ identifier | Vehicle | What it does |
+|---------|---------------|---------|---------------|
+| `ground_coordinator.py` | `ground` | `none` | Reads the `.plan` file; issues `transition_runner` commands to both drones; exposes next waypoint coordinates via `expose_field_zmq`. |
+| `drone_tracer.py` | `tracer` | `drone` | Follows waypoints queried from the ground coordinator; reports position via `expose_field_zmq`. |
+| `drone_orbiter.py` | `orbiter` | `drone` | Travels in parallel with the tracer; orbits the tracer's position at each waypoint. |
+
+### Constants (`consts.py`)
+
+```python consts.py
+ZMQ_ORBITER = "orbiter"
+ZMQ_TRACER = "tracer"
+ZMQ_GROUND = "ground"
+
+TAKEOFF_ALT = 20
+ALT_DIFF = 5  # distance between the tracer and orbiter
+```
+
+### Ground coordinator
+
+```python ground_coordinator.py
+"""
+zmq_preplanend_orbit mission
+
+there are two drones and a ground station
+
+one drone, the tracer, follows a preplanned trajectory file
+the other drone, the orbiter, will orbit the tracer at each waypoint
+
+the ground coordinator will read from the file and issue controls to each drone
+(ex: go to this waypoint or orbit this waypoint)
+
+the pattern proposed in this script is to have each "command" be a state on
+individual drones — thus, to make a drone do something, we transition their
+state from the central controller
+"""
+
+import asyncio
+from argparse import ArgumentParser
+from typing import List
+
+from aerpawlib.v1.runner import (
+    ZmqStateMachine,
+    at_init,
+    background,
+    expose_field_zmq,
+    in_background,
+    sleep,
+    state,
+    timed_state,
+)
+from aerpawlib.v1.util import Coordinate, Waypoint, read_from_plan_complete
+from aerpawlib.v1.vehicle import Drone
+
+from aerpawlib.v1.external import ExternalProcess
+from consts import *
+
+
+class GroundCoordinatorRunner(ZmqStateMachine):
+    _waypoints = []
+    _current_waypoint: int = 0
+
+    def initialize_args(self, extra_args: List[str]):
+        parser = ArgumentParser()
+        parser.add_argument(
+            "--file", help="Mission plan file path.", required=True
+        )
+        args = parser.parse_args(args=extra_args)
+        self._waypoints = read_from_plan_complete(args.file)
+
+    _tracer_ready = False
+    _orbiter_ready = False
+
+    @state(name="await_ready", first=True)
+    async def state_await_ready(self, _):
+        if not (self._tracer_ready and self._orbiter_ready):
+            return "await_ready"
+        return "take_off"
+
+    @state(name="callback_tracer_ready")
+    async def callback_tracer_ready(self, _):
+        print("tracer armed and ready")
+        self._tracer_ready = True
+        return "await_ready"
+
+    @state(name="callback_orbiter_ready")
+    async def callback_orbiter_ready(self, _):
+        print("orbiter armed and ready")
+        self._orbiter_ready = True
+        return "await_ready"
+
+    @state(name="take_off")
+    async def state_take_off(self, _):
+        print("taking off")
+        await self.transition_runner(ZMQ_TRACER, "take_off"),
+        await self.transition_runner(ZMQ_ORBITER, "take_off"),
+        print("taking off sent")
+        return "await_taken_off"
+
+    _tracer_taken_off = False
+    _orbiter_taken_off = False
+
+    @state(name="await_taken_off")
+    async def state_await_taken_off(self, _):
+        if not (self._tracer_taken_off and self._orbiter_taken_off):
+            return "await_taken_off"
+        return "next_waypoint"
+
+    @state(name="callback_tracer_taken_off")
+    async def callback_tracer_taken_off(self, _):
+        self._tracer_taken_off = True
+        return "await_taken_off"
+
+    @state(name="callback_orbiter_taken_off")
+    async def callback_orbiter_taken_off(self, _):
+        self._orbiter_taken_off = True
+        return "await_taken_off"
+
+    _tracer_at_waypoint = False
+    _orbiter_at_waypoint = False
+
+    @state(name="next_waypoint")
+    async def state_next_waypoint(self, _):
+        self._current_waypoint += 1
+        if self._current_waypoint >= len(self._waypoints):
+            return "rtl"
+        print(f"Waypoint {self._current_waypoint}")
+
+        waypoint = self._waypoints[self._current_waypoint]
+        if waypoint["command"] == 20:  # RTL encountered, finish routine
+            return "rtl"
+
+        await self.transition_runner(ZMQ_TRACER, "next_waypoint"),
+        await self.transition_runner(ZMQ_ORBITER, "next_waypoint"),
+
+        self._tracer_at_waypoint = False
+        self._orbiter_at_waypoint = False
+
+        return "await_in_transit"
+
+    @expose_field_zmq(name="tracer_next_waypoint")
+    async def get_tracer_next_waypoint(self, _):
+        waypoint = self._waypoints[self._current_waypoint]
+        coords = Coordinate(*waypoint["pos"])
+        return coords
+
+    @expose_field_zmq(name="orbiter_next_waypoint")
+    async def get_orbiter_next_waypoint(self, _):
+        # orbiter travels in a path parallel to tracer
+        waypoint = self._waypoints[self._current_waypoint]
+        coords = Coordinate(*waypoint["pos"])
+        tracer_pos = await self.query_field(ZMQ_TRACER, "position")
+        tracer_delta = coords - tracer_pos
+        orbiter_pos = await self.query_field(ZMQ_ORBITER, "position")
+        orbiter_next_pos = orbiter_pos + tracer_delta
+        return orbiter_next_pos
+
+    @state(name="await_in_transit")
+    async def state_await_in_transit(self, _):
+        if not (self._tracer_at_waypoint and self._orbiter_at_waypoint):
+            return "await_in_transit"
+        return "orbiter_start_orbit"
+
+    @state(name="callback_tracer_at_waypoint")
+    async def callback_tracer_at_waypoint(self, _):
+        self._tracer_at_waypoint = True
+        return "await_in_transit"
+
+    @state(name="callback_orbiter_at_waypoint")
+    async def callback_orbiter_at_waypoint(self, _):
+        self._orbiter_at_waypoint = True
+        return "await_in_transit"
+
+    _orbiter_orbit_done = False
+
+    @state(name="orbiter_start_orbit")
+    async def state_orbiter_start_orbit(self, _):
+        self._orbiter_orbit_done = False
+        await self.transition_runner(ZMQ_ORBITER, "orbit_tracer")
+        return "await_orbiter_orbiting"
+
+    @state(name="await_orbiter_orbiting")
+    async def state_await_orbiter_oribiting(self, _):
+        if self._orbiter_orbit_done:
+            return "next_waypoint"
+        return "await_orbiter_orbiting"
+
+    @state(name="callback_orbiter_orbit_done")
+    async def callback_orbiter_orbit_done(self, _):
+        self._orbiter_orbit_done = True
+        return "await_orbiter_orbiting"
+
+    _tracer_rtl_done = False
+    _orbiter_rtl_done = False
+
+    @state(name="rtl")
+    async def state_rtl(self, _):
+        await self.transition_runner(ZMQ_TRACER, "rtl"),
+        await self.transition_runner(ZMQ_ORBITER, "rtl"),
+        self._tracer_rtl_done = False
+        self._orbiter_rtl_done = False
+        return "await_rtl_done"
+
+    @state(name="await_rtl_done")
+    async def state_await_rtl_done(self, _):
+        if not (self._tracer_rtl_done and self._orbiter_rtl_done):
+            return "await_rtl_done"
+        return "land"
+
+    @state(name="callback_tracer_rtl_done")
+    async def callback_tracer_rtl_done(self, _):
+        self._tracer_rtl_done = True
+        return "await_rtl_done"
+
+    @state(name="callback_orbiter_rtl_done")
+    async def callback_orbiter_rtl_done(self, _):
+        self._orbiter_rtl_done = True
+        return "await_rtl_done"
+
+    @state(name="land")
+    async def state_land(self, _):
+        await self.transition_runner(ZMQ_TRACER, "land"),
+        await self.transition_runner(ZMQ_ORBITER, "land"),
+        await asyncio.sleep(5)
+        return
+```
+
+### Tracer and orbiter
+
+<CodeGroup>
+
+```python drone_tracer.py
+import asyncio
+
+from aerpawlib.v1.runner import (
+    ZmqStateMachine,
+    at_init,
+    background,
+    expose_field_zmq,
+    in_background,
+    sleep,
+    state,
+    timed_state,
+)
+from aerpawlib.v1.util import Coordinate, Waypoint, read_from_plan_complete
+from aerpawlib.v1.vehicle import Drone
+
+from aerpawlib.v1.external import ExternalProcess
+from consts import *
+
+
+class TracerRunner(ZmqStateMachine):
+    @expose_field_zmq(name="position")
+    async def get_drone_position(self, drone: Drone):
+        return drone.position
+
+    @state(name="wait_loop")
+    async def state_wait_loop(self, _):
+        # used to continually wait for an action to come in
+        await asyncio.sleep(0.1)
+        return "wait_loop"
+
+    @state(name="report_ready", first=True)
+    async def state_report_ready(self, _):
+        await self.transition_runner(ZMQ_GROUND, "callback_tracer_ready")
+        return "wait_loop"
+
+    @state(name="take_off")
+    async def state_take_off(self, drone: Drone):
+        print("taking off")
+        await drone.takeoff(TAKEOFF_ALT)
+        await self.transition_runner(ZMQ_GROUND, "callback_tracer_taken_off")
+        return "wait_loop"
+
+    @state(name="next_waypoint")
+    async def state_next_waypoint(self, drone: Drone):
+        coords = await self.query_field(ZMQ_GROUND, "tracer_next_waypoint")
+        await drone.goto_coordinates(coords)
+        await self.transition_runner(ZMQ_GROUND, "callback_tracer_at_waypoint")
+        return "wait_loop"
+
+    @state(name="rtl")
+    async def state_rtl(self, drone: Drone):
+        home_coords = Coordinate(
+            drone.home_coords.lat, drone.home_coords.lon, drone.position.alt
+        )
+        await drone.goto_coordinates(home_coords)
+        await self.transition_runner(ZMQ_GROUND, "callback_tracer_rtl_done")
+        return "wait_loop"
+
+    @state(name="land")
+    async def state_land(self, drone: Drone):
+        await drone.land()
+        return
+```
+
+```python drone_orbiter.py
+import asyncio
+
+from aerpawlib.v1.runner import (
+    ZmqStateMachine,
+    at_init,
+    background,
+    expose_field_zmq,
+    in_background,
+    sleep,
+    state,
+    timed_state,
+)
+from aerpawlib.v1.util import (
+    Coordinate,
+    VectorNED,
+    Waypoint,
+    read_from_plan_complete,
+)
+from aerpawlib.v1.vehicle import Drone
+
+from aerpawlib.v1.external import ExternalProcess
+from consts import *
+
+
+class OrbiterRunner(ZmqStateMachine):
+    @expose_field_zmq(name="position")
+    async def get_drone_position(self, drone: Drone):
+        return drone.position
+
+    @state(name="wait_loop")
+    async def state_wait_loop(self, _):
+        await asyncio.sleep(0.1)
+        return "wait_loop"
+
+    @state(name="report_ready", first=True)
+    async def state_report_ready(self, _):
+        await self.transition_runner(ZMQ_GROUND, "callback_orbiter_ready")
+        return "wait_loop"
+
+    @state(name="take_off")
+    async def state_take_off(self, drone: Drone):
+        print("taking off")
+        await drone.takeoff(TAKEOFF_ALT + ALT_DIFF)
+        await self.transition_runner(ZMQ_GROUND, "callback_orbiter_taken_off")
+        return "wait_loop"
+
+    @state(name="next_waypoint")
+    async def state_next_waypoint(self, drone: Drone):
+        coords = await self.query_field(ZMQ_GROUND, "orbiter_next_waypoint")
+        await drone.goto_coordinates(coords)
+        await self.transition_runner(
+            ZMQ_GROUND, "callback_orbiter_at_waypoint"
+        )
+        return "wait_loop"
+
+    @state(name="orbit_tracer")
+    async def state_orbit_tracer_start(self, drone: Drone):
+        self._orbit_coord_center = await self.query_field(
+            ZMQ_TRACER, "position"
+        )
+        self._orbit_end_position = drone.position
+        self._previous_thetas = []
+        self._prev_avg_theta = None
+        self._initial_theta = None
+        return "orbit"
+
+    @state(name="orbit")
+    async def state_orbit(self, drone: Drone):
+        current_pos = drone.position
+        radius_vec = (
+            current_pos - self._orbit_coord_center
+        )  # points out to drone, use tangent to orbit
+        perp_vec = radius_vec.cross_product(VectorNED(0, 0, 1))
+
+        leg_dist = radius_vec.hypot(True)
+        d = perp_vec.hypot(True)
+        perp_normalized = VectorNED(
+            perp_vec.north / d * leg_dist, perp_vec.east / d * leg_dist
+        )
+
+        await drone.goto_coordinates(drone.position + perp_normalized)
+
+        for _ in range(3):
+            perp_normalized = perp_normalized.rotate_by_angle(90)
+            await drone.goto_coordinates(
+                drone.position + perp_normalized + perp_normalized
+            )
+
+        perp_normalized = perp_normalized.rotate_by_angle(90)
+        await drone.goto_coordinates(drone.position + perp_normalized)
+
+        await self.transition_runner(ZMQ_GROUND, "callback_orbiter_orbit_done")
+        return "wait_loop"
+
+    @state(name="rtl")
+    async def state_rtl(self, drone: Drone):
+        home_coords = Coordinate(
+            drone.home_coords.lat, drone.home_coords.lon, drone.position.alt
+        )
+        await drone.goto_coordinates(home_coords)
+        await self.transition_runner(ZMQ_GROUND, "callback_orbiter_rtl_done")
+        return "wait_loop"
+
+    @state(name="land")
+    async def state_land(self, drone: Drone):
+        await drone.land()
+        return
+```
+
+</CodeGroup>
+
+### Startup sequence
+
+<Steps>
+  <Step title="Start the ZMQ proxy">
+    ```bash
+    aerpawlib --run-proxy
+    ```
+  </Step>
+  <Step title="Start two SITL instances">
+    Tracer on port `14570`, orbiter on port `14580`. The ground coordinator does not need a vehicle connection.
+  </Step>
+  <Step title="Run the tracer drone">
+    ```bash
+    aerpawlib --vehicle drone --conn udp://127.0.0.1:14570 \
+        --zmq-identifier tracer --zmq-proxy-server 127.0.0.1 \
+        --script examples/v1/zmq_preplanned_orbit/drone_tracer.py
+    ```
+  </Step>
+  <Step title="Run the orbiter drone">
+    ```bash
+    aerpawlib --vehicle drone --conn udp://127.0.0.1:14580 \
+        --zmq-identifier orbiter --zmq-proxy-server 127.0.0.1 \
+        --script examples/v1/zmq_preplanned_orbit/drone_orbiter.py
+    ```
+  </Step>
+  <Step title="Run the ground coordinator">
+    ```bash
+    aerpawlib --vehicle none --conn udp://127.0.0.1:14550 --skip-init \
+        --zmq-identifier ground --zmq-proxy-server 127.0.0.1 \
+        --script examples/v1/zmq_preplanned_orbit/ground_coordinator.py \
+        --file examples/v1/zmq_preplanned_orbit/orbit.plan
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The tracer and orbiter both start in `report_ready` and immediately call `transition_runner(ZMQ_GROUND, "callback_*_ready")`. The ground coordinator's `await_ready` state polls until both flags are set, then commands both drones to take off simultaneously.
+</Note>
+
+---
+
+## v2 ZMQ example
+
+The v2 API provides `ZmqStateMachine` with the same semantics. The `@expose_zmq` decorator replaces `expose_field_zmq`.
+
+```python zmq_state_machine_example.py (v2)
+"""
+ZmqStateMachine v2 Example - Remote state transitions via ZMQ.
+
+Run with:
+    # Terminal 1: start ZMQ proxy
+    aerpawlib --run-proxy
+
+    # Terminal 2: run this script
+    aerpawlib --api-version v2 --script examples/v2/zmq_state_machine_example.py \
+        --vehicle drone --conn udpin://127.0.0.1:14550 \
+        --zmq-identifier leader --zmq-proxy-server 127.0.0.1
+"""
+
+from aerpawlib.v2 import ZmqStateMachine, Drone, state, expose_zmq
+
+
+class RemoteMission(ZmqStateMachine):
+    """State machine with fly state exposed for remote ZMQ transition."""
+
+    @state(name="start", first=True)
+    async def start(self, drone: Drone):
+        print("[example] In start state, transitioning to fly")
+        return "fly"
+
+    @state(name="fly")
+    @expose_zmq("fly")
+    async def fly(self, drone: Drone):
+        print("[example] Flying - takeoff and hover")
+        await drone.takeoff(altitude=5)
+        await drone.land()
+        return None
+```
+
+```bash
+# Terminal 1
+aerpawlib --run-proxy
+
+# Terminal 2
+aerpawlib --api-version v2 \
+    --script examples/v2/zmq_state_machine_example.py \
+    --vehicle drone \
+    --conn udpin://127.0.0.1:14550 \
+    --zmq-identifier leader \
+    --zmq-proxy-server 127.0.0.1
+```

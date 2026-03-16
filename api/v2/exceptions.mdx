@@ -1,0 +1,251 @@
+---
+title: "Exceptions"
+description: "Full exception hierarchy, error codes, severity levels, and try/except patterns."
+---
+
+All aerpawlib v2 exceptions inherit from `AerpawlibError`. Each exception carries a `message`, machine-readable `code`, `severity`, and optionally an `original_error`.
+
+```python
+from aerpawlib.v2 import AerpawlibError, TakeoffError, NavigationError
+```
+
+---
+
+## `AerpawlibError` (base class)
+
+```python
+class AerpawlibError(Exception):
+    message: str
+    code: str
+    severity: Literal["warning", "error", "critical"]
+    original_error: Optional[Exception]
+```
+
+<ResponseField name="message" type="str">
+  Human-readable description of the error.
+</ResponseField>
+
+<ResponseField name="code" type="str">
+  Machine-readable error code string (e.g. `"TAKEOFF_ERROR"`).
+</ResponseField>
+
+<ResponseField name="severity" type="str">
+  One of `"warning"`, `"error"`, or `"critical"`. Critical errors indicate the experiment should terminate immediately.
+</ResponseField>
+
+<ResponseField name="original_error" type="Exception | None">
+  The underlying exception that caused this error, if any.
+</ResponseField>
+
+```python
+try:
+    await drone.takeoff(10)
+except AerpawlibError as e:
+    print(e.code)     # e.g. "TAKEOFF_ERROR"
+    print(e.severity) # "error"
+    print(e)          # human-readable message
+```
+
+---
+
+## Exception hierarchy
+
+```
+AerpawlibError
+├── AerpawConnectionError            (code: CONNECTION_ERROR)
+│   ├── ConnectionTimeoutError       (code: CONNECTION_TIMEOUT)
+│   ├── HeartbeatLostError           (code: HEARTBEAT_LOST, severity: critical)
+│   └── PortInUseError               (code: PORT_IN_USE)
+├── CommandError                     (code: COMMAND_ERROR)
+│   ├── ArmError                     (code: ARM_ERROR)
+│   ├── DisarmError                  (code: DISARM_ERROR)
+│   ├── TakeoffError                 (code: TAKEOFF_ERROR)
+│   ├── LandingError                 (code: LANDING_ERROR)
+│   ├── NavigationError              (code: NAVIGATION_ERROR)
+│   ├── VelocityError                (code: VELOCITY_ERROR)
+│   └── RTLError                     (code: RTL_ERROR)
+├── StateError                       (code: STATE_ERROR)
+│   ├── NotArmableError              (code: NOT_ARMABLE)
+│   ├── NotConnectedError            (code: NOT_CONNECTED)
+│   └── UnexpectedDisarmError        (code: UNEXPECTED_DISARM, severity: critical)
+├── RunnerError                      (code: RUNNER_ERROR)
+│   ├── NoEntrypointError            (code: NO_ENTRYPOINT)
+│   ├── NoInitialStateError          (code: NO_INITIAL_STATE)
+│   ├── MultipleInitialStatesError   (code: MULTIPLE_INITIAL_STATES)
+│   ├── InvalidStateError            (code: INVALID_STATE)
+│   └── InvalidStateNameError        (code: INVALID_STATE_NAME)
+└── PlanError                        (code: PLAN_ERROR)
+```
+
+---
+
+## Connection errors
+
+### `AerpawConnectionError`
+
+Base for all connection-related errors. Default code: `CONNECTION_ERROR`.
+
+### `ConnectionTimeoutError`
+
+Raised when no heartbeat is received within the connect timeout.
+
+```python
+from aerpawlib.v2 import ConnectionTimeoutError
+
+try:
+    drone = await Drone.connect(conn_str, timeout=10.0)
+except ConnectionTimeoutError as e:
+    print(f"Timed out after {e.timeout_seconds}s")
+```
+
+<ResponseField name="timeout_seconds" type="float">
+  How many seconds elapsed before the timeout.
+</ResponseField>
+
+### `HeartbeatLostError`
+
+Raised mid-flight when the vehicle heartbeat is lost. **Severity: critical.**
+
+<ResponseField name="last_heartbeat_age" type="float">
+  Seconds since the last heartbeat was received.
+</ResponseField>
+
+### `PortInUseError`
+
+Raised when the MAVSDK gRPC port is already bound by another process.
+
+<ResponseField name="port" type="int">
+  The conflicting port number.
+</ResponseField>
+
+---
+
+## Command errors
+
+### `ArmError` / `DisarmError`
+
+Raised when a MAVLink arm or disarm command is rejected by the autopilot.
+
+### `TakeoffError`
+
+Raised when the MAVSDK takeoff command fails.
+
+```python
+from aerpawlib.v2 import TakeoffError
+
+try:
+    await drone.takeoff(altitude=10)
+except TakeoffError as e:
+    print(e.code, e.message)
+```
+
+### `LandingError`
+
+Raised when the land command fails or times out waiting for disarm.
+
+### `NavigationError`
+
+Raised when `goto_coordinates` fails or times out.
+
+### `VelocityError`
+
+Raised when `set_velocity` cannot start offboard mode.
+
+### `RTLError`
+
+Raised when `return_to_launch` fails or times out.
+
+---
+
+## State errors
+
+### `NotArmableError`
+
+Raised when `set_armed(True)` is called but pre-arm checks fail.
+
+### `NotConnectedError`
+
+Raised when a command is attempted on a vehicle that is not connected.
+
+### `UnexpectedDisarmError`
+
+Raised automatically by `BasicRunner` and `StateMachine` when the vehicle disarms unexpectedly during a mission (e.g. motor failsafe). **Severity: critical.** The experiment terminates cleanly.
+
+---
+
+## Runner errors
+
+### `NoEntrypointError`
+
+Raised when `BasicRunner.run()` is called but no `@entrypoint` was declared.
+
+### `NoInitialStateError`
+
+Raised when `StateMachine.run()` is called but no state is marked `first=True`.
+
+### `MultipleInitialStatesError`
+
+Raised at class definition time if more than one state is marked `first=True`.
+
+### `InvalidStateError`
+
+Raised during execution when a state returns a name that does not exist in the machine.
+
+<ResponseField name="state_name" type="str">
+  The invalid state name that was returned.
+</ResponseField>
+
+<ResponseField name="available_states" type="list[str]">
+  The valid state names for this runner.
+</ResponseField>
+
+### `InvalidStateNameError`
+
+Raised at class definition time when `@state` or `@expose_zmq` is given an empty name.
+
+---
+
+## `PlanError`
+
+Raised when a `.plan` file cannot be parsed (file not found, invalid JSON, wrong `fileType`, or malformed items).
+
+---
+
+## Common patterns
+
+```python
+from aerpawlib.v2 import (
+    AerpawlibError,
+    TakeoffError,
+    NavigationError,
+    HeartbeatLostError,
+    UnexpectedDisarmError,
+)
+
+try:
+    await drone.takeoff(10)
+except TakeoffError as e:
+    print(f"Takeoff rejected: {e.message}")
+except AerpawlibError as e:
+    # Catch any other aerpawlib error
+    if e.severity == "critical":
+        raise  # let critical errors propagate
+    print(f"[{e.severity}] {e.code}: {e}")
+
+# Distinguish navigation timeout from command failure
+try:
+    await drone.goto_coordinates(target)
+except NavigationError as e:
+    if e.original_error and isinstance(e.original_error, TimeoutError):
+        print("Navigation timed out")
+    else:
+        print(f"Navigation command failed: {e}")
+
+# Critical errors are raised as their concrete type
+try:
+    await runner.run(drone)
+except HeartbeatLostError as e:
+    print(f"Lost heartbeat {e.last_heartbeat_age:.1f}s ago")
+except UnexpectedDisarmError:
+    print("Vehicle disarmed mid-mission — experiment terminated")
+```

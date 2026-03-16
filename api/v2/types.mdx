@@ -1,0 +1,240 @@
+---
+title: "Types"
+description: "Core data types: Coordinate, VectorNED, Battery, GPSInfo, Attitude, and Waypoint."
+---
+
+## Coordinate
+
+Absolute point in WGS84 space.
+
+```python
+from aerpawlib.v2 import Coordinate
+
+pos = Coordinate(lat=35.7275, lon=-78.696, alt=20.0)
+```
+
+<ResponseField name="lat" type="float">
+  Latitude in decimal degrees.
+</ResponseField>
+
+<ResponseField name="lon" type="float">
+  Longitude in decimal degrees.
+</ResponseField>
+
+<ResponseField name="alt" type="float">
+  Altitude in metres (relative to home/AGL unless stated otherwise). Default `0.0`.
+</ResponseField>
+
+### Arithmetic
+
+```python
+# Add a NED displacement to get a new Coordinate
+new_pos = pos + VectorNED(north=20, east=10)       # -> Coordinate
+
+# Subtract a VectorNED to move in the opposite direction
+prev_pos = pos - VectorNED(20, 10)                  # -> Coordinate
+
+# Subtract two Coordinates to get the NED vector between them
+delta = pos - other_coord                           # -> VectorNED
+```
+
+### Methods
+
+```python
+def distance(self, other: Coordinate) -> float
+```
+3D distance to `other` in metres (Haversine + altitude delta via Pythagoras).
+
+```python
+def ground_distance(self, other: Coordinate) -> float
+```
+Horizontal (2D) distance to `other` in metres, ignoring altitude difference.
+
+```python
+def bearing(self, other: Coordinate, wrap_360: bool = True) -> float
+```
+Bearing from `self` to `other` in degrees. Wraps to `[0, 360)` by default.
+
+```python
+def to_json(self) -> str
+```
+JSON string with `lat`, `lon`, and `alt` fields.
+
+```python
+# Example
+pos = Coordinate(35.727, -78.696, 10)
+target = Coordinate(35.728, -78.695, 10)
+print(pos.distance(target))       # ~140.0 m
+print(pos.ground_distance(target)) # horizontal only
+print(pos.bearing(target))         # ~26.6°
+```
+
+---
+
+## VectorNED
+
+Displacement in NED (North, East, Down) coordinates, in metres.
+
+```python
+from aerpawlib.v2 import VectorNED
+
+v = VectorNED(north=20, east=0, down=-5)  # 20 m north, 5 m up
+```
+
+<ResponseField name="north" type="float">
+  Displacement northward in metres.
+</ResponseField>
+
+<ResponseField name="east" type="float">
+  Displacement eastward in metres.
+</ResponseField>
+
+<ResponseField name="down" type="float">
+  Displacement downward in metres (negative = upward). Default `0.0`.
+</ResponseField>
+
+### Arithmetic
+
+```python
+a + b   # element-wise add
+a - b   # element-wise subtract
+a * s   # scalar multiply (also s * a)
+```
+
+### Methods
+
+```python
+def hypot(self, ignore_down: bool = False) -> float
+```
+Euclidean magnitude. Pass `ignore_down=True` for horizontal (2D) magnitude.
+
+```python
+def norm(self) -> VectorNED
+```
+Unit vector in the same direction. Returns `VectorNED(0, 0, 0)` if magnitude is zero.
+
+```python
+def rotate_by_angle(self, angle_deg: float) -> VectorNED
+```
+Rotate the vector by `angle_deg` degrees counter-clockwise when viewed from above.
+
+```python
+def cross_product(self, other: VectorNED) -> VectorNED
+```
+Cross product `self × other`.
+
+---
+
+## Battery
+
+Battery telemetry snapshot.
+
+```python
+from aerpawlib.v2 import Battery
+```
+
+<ResponseField name="voltage" type="float">
+  Battery voltage in volts.
+</ResponseField>
+
+<ResponseField name="current" type="float">
+  Current draw in amps.
+</ResponseField>
+
+<ResponseField name="level" type="int">
+  Remaining charge as an integer percentage `0–100`.
+</ResponseField>
+
+```python
+print(drone.battery.voltage)  # e.g. 12.4
+print(drone.battery.level)    # e.g. 87
+```
+
+---
+
+## GPSInfo
+
+GPS telemetry snapshot.
+
+```python
+from aerpawlib.v2 import GPSInfo
+```
+
+<ResponseField name="fix_type" type="int">
+  MAVLink GPS fix type: `0`–`1` = no fix, `2` = 2D fix, `3` = 3D fix.
+</ResponseField>
+
+<ResponseField name="satellites_visible" type="int">
+  Number of GPS satellites currently visible.
+</ResponseField>
+
+```python
+if drone.gps.fix_type >= 3:
+    print("3D GPS fix acquired")
+```
+
+---
+
+## Attitude
+
+Attitude (orientation) snapshot. All fields are in **radians**.
+
+```python
+from aerpawlib.v2 import Attitude
+import math
+```
+
+<ResponseField name="roll" type="float">
+  Roll angle in radians.
+</ResponseField>
+
+<ResponseField name="pitch" type="float">
+  Pitch angle in radians.
+</ResponseField>
+
+<ResponseField name="yaw" type="float">
+  Yaw angle in radians.
+</ResponseField>
+
+<Note>
+Attitude values are stored in radians. MAVSDK reports degrees; aerpawlib converts them with `math.radians()` before storing. Use `math.degrees(drone.attitude.yaw)` to convert to degrees for display.
+</Note>
+
+```python
+import math
+yaw_deg = math.degrees(drone.attitude.yaw)
+print(f"Yaw: {yaw_deg:.1f}°")
+```
+
+---
+
+## Waypoint
+
+Named tuple returned by `read_from_plan()`. Defined in `aerpawlib.v2.plan`.
+
+```python
+from aerpawlib.v2 import Waypoint
+# Waypoint = Tuple[int, float, float, float, int, float]
+# fields:    command, lat,   lon,   alt,  id,   speed
+```
+
+Fields by position:
+
+| Index | Name | Type | Description |
+|-------|------|------|-------------|
+| `[0]` | `command` | `int` | QGroundControl command code (e.g. `16` = waypoint, `22` = takeoff) |
+| `[1]` | `lat` | `float` | Latitude (WGS84) |
+| `[2]` | `lon` | `float` | Longitude (WGS84) |
+| `[3]` | `alt` | `float` | Altitude in metres |
+| `[4]` | `waypoint_id` | `int` | `doJumpId` from the plan file |
+| `[5]` | `speed` | `float` | Speed in m/s at this waypoint |
+
+Use `get_location_from_waypoint(wp)` to extract a `Coordinate`.
+
+```python
+from aerpawlib.v2.plan import read_from_plan, get_location_from_waypoint
+
+for wp in read_from_plan("mission.plan"):
+    coord = get_location_from_waypoint(wp)
+    await drone.goto_coordinates(coord)
+```

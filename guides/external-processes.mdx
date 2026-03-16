@@ -1,0 +1,183 @@
+---
+title: "External Processes"
+description: "Spawn subprocesses from your mission script and interact with them asynchronously using ExternalProcess."
+---
+
+`ExternalProcess` provides an async interface for starting subprocesses and communicating with them through stdin/stdout. This is useful for running radio scripts, sensor readers, or any external tool that your mission needs to interact with.
+
+## Importing
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.external import ExternalProcess
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2 import ExternalProcess
+    # or
+    from aerpawlib.v2.external import ExternalProcess
+    ```
+  </Tab>
+</Tabs>
+
+## Constructor
+
+```python
+ExternalProcess(
+    executable: str,
+    params: Optional[List[str]] = None,
+    stdin: Optional[str] = None,
+    stdout: Optional[str] = None,
+)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `executable` | `str` | Command or path to the executable |
+| `params` | `list[str]` | Command-line arguments to pass |
+| `stdin` | `str` | Filename to redirect as stdin. If set, `send_input()` is unavailable. |
+| `stdout` | `str` | Filename to redirect stdout to. If set, `read_line()` and `wait_until_output()` are unavailable. |
+
+The process is **not started** until you call `await proc.start()`.
+
+## Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `await start()` | `None` | Starts the process |
+| `await read_line()` | `Optional[str]` | Reads one line from stdout. Returns `None` when the process exits or stdout is redirected. |
+| `await send_input(data: str)` | `None` | Writes `data` to stdin. Raises `RuntimeError` if stdin is redirected. |
+| `await wait_until_output(output_regex: str)` | `List[str]` | Blocks until a stdout line matches `output_regex`. Returns all lines read up to and including the match, or all buffered lines if the process exits first. |
+| `await wait_until_terminated()` | `None` | Blocks until the process exits |
+
+## Examples
+
+### Reading process output line by line
+
+```python
+from aerpawlib.v1.runner import BasicRunner, entrypoint
+from aerpawlib.v1.external import ExternalProcess
+
+class MyScript(BasicRunner):
+    @entrypoint
+    async def run(self, vehicle):
+        # Run `ls` and print each line
+        ls = ExternalProcess("ls")
+        await ls.start()
+        while line := await ls.read_line():
+            print(line)
+```
+
+### Waiting for a specific output pattern
+
+```python
+# Wait until the process produces a line containing "READY"
+proc = ExternalProcess("python3", params=["-u", "sensor_reader.py"])
+await proc.start()
+buff = await proc.wait_until_output(r"READY")
+print(f"Sensor ready. Lines before ready: {buff}")
+
+# Continue reading
+while line := await proc.read_line():
+    print(f"Sensor: {line}")
+```
+
+### Interactive stdin/stdout
+
+```python
+# Talk to a process interactively using send_input and read_line
+cat = ExternalProcess("cat")
+await cat.start()
+await cat.send_input("hello\n")
+response = await cat.read_line()
+print(response)  # "hello"
+```
+
+### Measuring network latency with ping
+
+This pattern is used in `examples/v1/zmq_runner/leader.py` to measure ping latency during a flight experiment:
+
+```python
+import re
+from aerpawlib.v1.external import ExternalProcess
+
+_ping_regex = re.compile(
+    r".+icmp_seq=(?P<seq>\d+).+time=(?P<time>\d\.\d+) ms"
+)
+
+async def measure_latency(address: str, count: int) -> float:
+    ping = ExternalProcess("ping", params=["-c", str(count), address])
+    await ping.start()
+
+    latencies = []
+    buff = 1
+    while buff:
+        buff = await ping.wait_until_output(r"icmp_seq=")
+        if not buff:
+            break
+        match = _ping_regex.match(buff[-1])
+        if match is None:
+            continue
+        latencies.append(float(match.group("time")))
+        if match.group("seq") == str(count):
+            break
+
+    return sum(latencies) / len(latencies)
+```
+
+### Parsing process output
+
+```python
+import re
+from aerpawlib.v1.external import ExternalProcess
+
+class MyScript(BasicRunner):
+    @entrypoint
+    async def run(self, vehicle):
+        times = 5
+        ping = ExternalProcess("ping", params=["127.0.0.1", "-c", str(times)])
+        await ping.start()
+
+        ping_re = re.compile(
+            r".+icmp_seq=(?P<seq>\d+).+time=(?P<time>\d\.\d+) ms"
+        )
+        while buff := await ping.wait_until_output(r"icmp_seq="):
+            match = ping_re.match(buff[-1])
+            print(f"latency: {match.group('time')} ms")
+            if match.group("seq") == str(times):
+                break
+```
+
+### Waiting for process exit
+
+```python
+proc = ExternalProcess("my_radio_script.sh", params=["--channel", "6"])
+await proc.start()
+
+# Do other work while the script runs...
+await drone.goto_coordinates(waypoint)
+
+# Block until the radio script finishes
+await proc.wait_until_terminated()
+```
+
+## Differences between v1 and v2
+
+| Feature | v1 | v2 |
+|---------|----|----|  
+| Process launch | `asyncio.create_subprocess_shell` | `asyncio.create_subprocess_exec` |
+| Argument handling | Arguments joined into a shell string | Arguments passed as a list (safer, no shell injection) |
+| Output encoding | ASCII strict | ASCII with `errors='replace'` |
+
+<Note>
+In v2, the executable and its parameters are passed directly to `asyncio.create_subprocess_exec` as a list. This means you must split the command yourself — do not pass shell syntax like `"ls -la"` as the executable. Pass `executable="ls"` and `params=["-la"]` instead.
+</Note>
+
+## Use cases in AERPAW experiments
+
+- **Radio scripts**: Launch a data-collection radio script and read its output at each waypoint.
+- **Sensor integration**: Start a sensor reader daemon and wait for it to report `READY` before beginning flight.
+- **Diagnostics**: Run `ping` or network measurement tools between waypoints and log the results to OEO.
+- **Co-located tools**: Invoke any command-line tool available on the experiment VM without needing to rewrite it as Python.

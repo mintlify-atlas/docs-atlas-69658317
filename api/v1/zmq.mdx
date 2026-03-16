@@ -1,0 +1,212 @@
+---
+title: "ZMQ Utilities"
+description: "ZMQ proxy, connectivity helpers, and ZmqStateMachine — inter-process communication for multi-vehicle aerpawlib missions."
+---
+
+The v1 API includes a ZMQ-based communication layer for coordinating multiple vehicles or processes in a single experiment. The architecture uses a central **XSUB/XPUB proxy** as a message broker.
+
+```
+  Process A          Proxy           Process B
+  (publisher) ──► [XSUB:5570]     [XPUB:5571] ──► (subscriber)
+                  [XPUB:5571] ──► (all subs)
+```
+
+```python
+from aerpawlib.v1 import run_zmq_proxy, check_zmq_proxy_reachable
+```
+
+---
+
+## `run_zmq_proxy`
+
+```python
+run_zmq_proxy()
+```
+
+Start a ZMQ XSUB/XPUB forwarder device that acts as the central message broker for all `ZmqStateMachine` runners.
+
+- Binds an **XSUB** socket on port `5570` (incoming messages from publishers)
+- Binds an **XPUB** socket on port `5571` (outgoing broadcast to subscribers)
+
+<Warning>
+This function **blocks indefinitely**. Always call it in a separate process or thread — never in the same process as a runner.
+</Warning>
+
+### Ports
+
+| Constant | Default | Description |
+|---|---|---|
+| `ZMQ_PROXY_IN_PORT` | `"5570"` | Publishers connect here |
+| `ZMQ_PROXY_OUT_PORT` | `"5571"` | Subscribers connect here |
+
+### CLI usage
+
+The proxy can be launched via the aerpawlib CLI:
+
+```bash
+aerpawlib --run-proxy
+```
+
+### Programmatic usage
+
+```python
+import multiprocessing
+from aerpawlib.v1 import run_zmq_proxy
+
+# Start proxy in a separate process before launching runners
+proxy_proc = multiprocessing.Process(target=run_zmq_proxy, daemon=True)
+proxy_proc.start()
+```
+
+---
+
+## `check_zmq_proxy_reachable`
+
+```python
+reachable = check_zmq_proxy_reachable(proxy_addr, timeout_s=2.0)
+```
+
+Perform a quick TCP connectivity check to the proxy's subscribe port (`ZMQ_PROXY_OUT_PORT`). Use this before starting a `ZmqStateMachine` to give a clear error instead of a silent hang.
+
+<ParamField path="proxy_addr" type="str" required>
+  Hostname or IP address of the proxy server (e.g. `"127.0.0.1"`).
+</ParamField>
+
+<ParamField path="timeout_s" type="float">
+  Connection timeout in seconds. Defaults to `2.0`.
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  `True` if the proxy port is accepting connections, `False` otherwise.
+</ResponseField>
+
+```python
+from aerpawlib.v1 import check_zmq_proxy_reachable
+
+if not check_zmq_proxy_reachable("127.0.0.1"):
+    raise RuntimeError("ZMQ proxy is not running! Start it with: aerpawlib --run-proxy")
+```
+
+---
+
+## ZmqStateMachine
+
+`ZmqStateMachine` is a `StateMachine` subclass with ZMQ-based remote control. It connects to the proxy automatically via two background tasks (`_zmq_bg_sub` and `_zmq_bg_pub`).
+
+See the [Runners page](/api/v1/runners#zmqstatemachine) for the full API reference including `@expose_zmq`, `@expose_field_zmq`, `transition_runner`, and `query_field`.
+
+### Message types
+
+The ZMQ layer uses three internal message types (defined as constants):
+
+| Constant | Value | Description |
+|---|---|---|
+| `ZMQ_TYPE_TRANSITION` | `"state_transition"` | Trigger a state change on a remote runner |
+| `ZMQ_TYPE_FIELD_REQUEST` | `"field_request"` | Request a field value from a remote runner |
+| `ZMQ_TYPE_FIELD_CALLBACK` | `"field_callback"` | Reply carrying the requested field value |
+
+---
+
+## Multi-vehicle coordination example
+
+This example shows a leader drone that triggers a follower drone to start its mission and then queries the follower's position.
+
+```python
+# proxy.py — run this first
+from aerpawlib.v1 import run_zmq_proxy
+run_zmq_proxy()  # blocks
+```
+
+```python
+# leader.py
+from aerpawlib.v1 import (
+    Drone, Coordinate,
+    ZmqStateMachine, state, expose_field_zmq,
+)
+import asyncio
+
+class LeaderDrone(ZmqStateMachine):
+    @state(name="start", first=True)
+    async def start(self, drone: Drone):
+        await drone.takeoff(15)
+        return "signal_follower"
+
+    @state(name="signal_follower")
+    async def signal_follower(self, drone: Drone):
+        # trigger the follower to start its mission
+        await self.transition_runner("follower", "start_mission")
+        return "query_follower"
+
+    @state(name="query_follower")
+    async def query_follower(self, drone: Drone):
+        pos = await self.query_field("follower", "position", timeout=30.0)
+        print(f"Follower position: {pos}")
+        return "land"
+
+    @state(name="land")
+    async def land_state(self, drone: Drone):
+        await drone.return_to_launch()
+
+    @expose_field_zmq(name="position")
+    async def get_position(self, drone: Drone):
+        p = drone.position
+        return {"lat": p.lat, "lon": p.lon, "alt": p.alt}
+```
+
+```python
+# follower.py
+from aerpawlib.v1 import (
+    Drone, Coordinate,
+    ZmqStateMachine, state, expose_zmq, expose_field_zmq,
+)
+
+class FollowerDrone(ZmqStateMachine):
+    @state(name="idle", first=True)
+    async def idle(self, drone: Drone):
+        await asyncio.sleep(1)
+        return "idle"  # loop until leader triggers start_mission
+
+    @expose_zmq(name="start_mission")
+    @state(name="mission")
+    async def mission(self, drone: Drone):
+        await drone.takeoff(10)
+        await drone.goto_coordinates(Coordinate(35.7280, -78.6955, 10))
+        return "land"
+
+    @state(name="land")
+    async def land_state(self, drone: Drone):
+        await drone.return_to_launch()
+
+    @expose_field_zmq(name="position")
+    async def get_position(self, drone: Drone):
+        p = drone.position
+        return {"lat": p.lat, "lon": p.lon, "alt": p.alt}
+```
+
+### Running the example
+
+```bash
+# Terminal 1: start the proxy
+aerpawlib --run-proxy
+
+# Terminal 2: start the follower first (waits in idle state)
+aerpawlib --script follower.py --vehicle udp://:14541 \
+  --zmq-identifier follower --zmq-proxy-server 127.0.0.1
+
+# Terminal 3: start the leader
+aerpawlib --script leader.py --vehicle udp://:14540 \
+  --zmq-identifier leader --zmq-proxy-server 127.0.0.1
+```
+
+---
+
+## Architecture notes
+
+<Note>
+The ZMQ proxy must be started **before** any runners that use ZMQ bindings. `ZmqStateMachine._initialize_zmq_bindings` calls `check_zmq_proxy_reachable` and logs a warning (not an error) if the proxy is unreachable, allowing tests to run without a proxy.
+</Note>
+
+- All ZMQ messages are serialized with Python's `pickle` protocol (`send_pyobj` / `recv_pyobj`).
+- Each `ZmqStateMachine` has a unique `vehicle_identifier` string. Messages are filtered by this identifier in the subscriber background task.
+- State-transition messages set an internal override flag (`_override_next_state_transition`) which is consumed at the next state boundary — transitions are **not** immediate mid-state.
+- Field queries use a `timeout` (default `ZMQ_QUERY_FIELD_TIMEOUT_S = 30.0` s) and raise `asyncio.TimeoutError` if the peer never replies.

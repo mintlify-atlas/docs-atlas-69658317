@@ -1,0 +1,116 @@
+---
+title: "v2 API Overview"
+description: "Introduction to the aerpawlib v2 async-first API, its design goals, and available exports."
+---
+
+The v2 API is a modern, async-first replacement for the v1 API. It eliminates the dual-loop architecture, `ThreadSafeValue` overhead, and function-attribute runners in favour of a **single event loop**, native async telemetry, descriptor-based decorators, and built-in safety/connection handling.
+
+## Key design changes from v1
+
+| v1 | v2 |
+|----|----|
+| Dual event loop + background thread for MAVSDK | Single `asyncio` event loop; all commands use `await` |
+| `ThreadSafeValue` wrappers for telemetry | Plain attributes updated by async subscriptions |
+| Function-attribute runner config | Descriptor-based decorators (`@state`, `@entrypoint`, …) |
+| No built-in progress/cancellation | `VehicleTask` for non-blocking commands |
+| Safety optional, manual wiring | `SafetyCheckerClient` wired through `connect(safety=…)` |
+
+## Import pattern
+
+All public symbols are re-exported from the top-level package:
+
+```python
+from aerpawlib.v2 import (
+    Drone, Rover, Vehicle, DummyVehicle,
+    Coordinate, VectorNED, Battery, GPSInfo, Attitude,
+    BasicRunner, StateMachine, ZmqStateMachine,
+    entrypoint, state, timed_state, background, at_init,
+    expose_zmq, expose_field_zmq,
+    VehicleTask,
+    MockVehicle,
+    read_from_plan, get_location_from_waypoint,
+    run_zmq_proxy, check_zmq_proxy_reachable,
+    AerpawlibError, TakeoffError, NavigationError,
+)
+```
+
+Safety-specific classes live in the sub-module:
+
+```python
+from aerpawlib.v2.safety import SafetyCheckerClient, NoOpSafetyChecker, PreflightChecks
+```
+
+## Quick start
+
+```python
+from aerpawlib.v2 import BasicRunner, Drone, VectorNED, entrypoint
+
+class MyMission(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        await drone.takeoff(altitude=10)
+        await drone.goto_coordinates(drone.position + VectorNED(20, 0))
+        await drone.land()
+```
+
+Run with the CLI:
+
+```bash
+aerpawlib --api-version v2 --script my_mission.py --vehicle drone --conn udpin://127.0.0.1:14550
+```
+
+## All public exports (`__all__`)
+
+<CardGroup cols={2}>
+  <Card title="Vehicles" icon="plane" href="/api/v2/vehicles">
+    `Drone`, `Rover`, `Vehicle`, `DummyVehicle`, `VehicleTask`, `GPSProtocol`, `VehicleProtocol`
+  </Card>
+  <Card title="Runners & Decorators" icon="gear" href="/api/v2/runners">
+    `BasicRunner`, `StateMachine`, `ZmqStateMachine`, `Runner`, plus all config dataclasses and decorators
+  </Card>
+  <Card title="Types" icon="cube" href="/api/v2/types">
+    `Coordinate`, `VectorNED`, `Battery`, `GPSInfo`, `Attitude`, `Waypoint`
+  </Card>
+  <Card title="Safety" icon="shield" href="/api/v2/safety">
+    `SafetyCheckerClient`, `NoOpSafetyChecker`, `PreflightChecks`
+  </Card>
+  <Card title="ZMQ Utilities" icon="network-wired" href="/api/v2/zmq">
+    `run_zmq_proxy`, `check_zmq_proxy_reachable`
+  </Card>
+  <Card title="Plan Files" icon="map" href="/api/v2/plan">
+    `read_from_plan`, `read_from_plan_complete`, `get_location_from_waypoint`, `Waypoint`
+  </Card>
+  <Card title="Testing" icon="flask" href="/api/v2/testing">
+    `MockVehicle`, `DummyVehicle`
+  </Card>
+  <Card title="Exceptions" icon="triangle-exclamation" href="/api/v2/exceptions">
+    `AerpawlibError` and the full exception hierarchy
+  </Card>
+</CardGroup>
+
+Full symbol list from `__all__`:
+
+```
+AERPAW_Platform        AerpawConnectionError   AerpawlibError
+ArmError               Attitude               Battery
+BasicRunner            BasicRunnerConfig      CommandError
+ConnectionTimeoutError Coordinate             DisarmError
+Drone                  DummyVehicle           ExternalProcess
+GPSInfo                GPSProtocol            HeartbeatLostError
+InvalidStateError      InvalidStateNameError  LandingError
+MockVehicle            MultipleInitialStatesError  NavigationError
+NoEntrypointError      NoInitialStateError    NotArmableError
+NotConnectedError      PlanError              PortInUseError
+RTLError               Rover                  Runner
+RunnerError            StateError             StateMachine
+StateMachineConfig     StateSpec              TakeoffError
+UnexpectedDisarmError  Vehicle                VehicleProtocol
+VehicleTask            VectorNED              VelocityError
+Waypoint               ZmqStateMachine        ZmqStateMachineConfig
+at_init                background             check_zmq_proxy_reachable
+constants              do_intersect           entrypoint
+expose_field_zmq       expose_zmq             get_location_from_waypoint
+inside                 read_from_plan         read_from_plan_complete
+read_geofence          run_zmq_proxy          state
+timed_state
+```

@@ -1,0 +1,244 @@
+---
+title: "Safety Checker"
+description: "Validate waypoints, takeoff altitude, speed, and landing against geofences and vehicle limits before commanding the vehicle."
+---
+
+The safety checker is an optional server process that validates flight commands against configurable geofences and vehicle limits before they are executed. The server runs as a separate process; your script communicates with it through a client.
+
+## How it works
+
+1. A **SafetyCheckerServer** loads a YAML config file that specifies vehicle limits and paths to KML polygon files defining allowed and no-go zones.
+2. A **SafetyCheckerClient** in your script (or wired automatically by the CLI) sends validation requests before issuing commands.
+3. The server checks:
+   - Altitude is within `min_alt` / `max_alt` (copter only).
+   - The waypoint is inside at least one `include_geofences` polygon.
+   - The waypoint is not inside any `exclude_geofences` polygon.
+   - The path from current position to the waypoint does not cross a geofence boundary or enter a no-go zone.
+   - Speed is within `min_speed` / `max_speed`.
+4. Each validation returns `(bool, str)` — `(True, "")` for pass, or `(False, reason)` for fail.
+
+## v1: Manual setup
+
+### 1. Start the server
+
+The server runs in a separate process and **blocks** until terminated.
+
+```bash
+python -m aerpawlib.v1.safety --port 14580 --vehicle_config geofence_config.yaml
+```
+
+Or in Python (for scripted launch):
+
+```python
+from aerpawlib.v1.safety import SafetyCheckerServer
+
+# This call blocks until the process is killed
+SafetyCheckerServer("geofence_config.yaml", server_port=14580)
+```
+
+### 2. Use the client in your script
+
+```python
+from aerpawlib.v1.runner import BasicRunner, entrypoint
+from aerpawlib.v1.safety import SafetyCheckerClient
+from aerpawlib.v1.vehicle import Drone
+
+class SafeFlight(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        checker = SafetyCheckerClient("127.0.0.1", 14580)
+
+        # Verify the server is reachable
+        ok, msg = checker.check_server_status()
+        if not ok:
+            print("Safety checker not running!")
+            return
+
+        # Validate takeoff altitude
+        pos = drone.position
+        ok, msg = checker.validate_takeoff_command(
+            takeoff_alt=10,
+            current_lat=pos.lat,
+            current_lon=pos.lon,
+        )
+        if not ok:
+            print(f"Cannot take off: {msg}")
+            return
+
+        await drone.takeoff(10)
+
+        # Validate a waypoint before navigating
+        target = drone.position + VectorNED(50, 0)
+        ok, msg = checker.validate_waypoint_command(drone.position, target)
+        if ok:
+            await drone.goto_coordinates(target)
+        else:
+            print(f"Waypoint rejected: {msg}")
+
+        # Validate speed before changing it
+        ok, msg = checker.validate_change_speed_command(8.0)
+        if ok:
+            await drone.set_groundspeed(8.0)
+
+        # Validate landing position
+        ok, msg = checker.validate_landing_command(drone.position.lat, drone.position.lon)
+        if ok:
+            await drone.land()
+```
+
+### v1 SafetyCheckerClient methods
+
+All methods return `Tuple[bool, str]`.
+
+| Method | Parameters | Description |
+|--------|------------|-------------|
+| `check_server_status()` | — | Returns `(True, "")` if the server is running |
+| `validate_waypoint_command(current, next_loc)` | `Coordinate, Coordinate` | Validates path from current to next position |
+| `validate_change_speed_command(new_speed)` | `float` | Checks speed against min/max limits |
+| `validate_takeoff_command(takeoff_alt, lat, lon)` | `float, float, float` | Checks altitude; records takeoff position for later landing validation |
+| `validate_landing_command(lat, lon)` | `float, float` | Checks landing is within 5 m of takeoff position |
+
+## v2: Automatic wiring via CLI
+
+In v2, aerpawlib builds and injects the safety client automatically when `--safety-checker-port` is provided or when running inside AERPAW.
+
+```bash
+# Explicit port
+aerpawlib --api-version v2 --script my_mission.py \
+  --conn udpin://127.0.0.1:14550 --vehicle drone \
+  --safety-checker-port 14580 --no-aerpaw-environment
+
+# Inside AERPAW: defaults to port 14580 automatically
+aerpawlib --api-version v2 --script my_mission.py \
+  --conn udpin://127.0.0.1:14550 --vehicle drone
+```
+
+When connected, commands like `can_takeoff`, `can_goto`, and `can_land` forward to the safety server automatically:
+
+```python
+from aerpawlib.v2 import BasicRunner, Drone, VectorNED, entrypoint
+
+class SafeFlight(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        # Checks armable state, GPS fix, battery, AND safety server
+        ok, msg = await drone.can_takeoff(altitude=10)
+        if not ok:
+            print(f"Cannot take off: {msg}")
+            return
+        await drone.takeoff(altitude=10)
+
+        target = drone.position + VectorNED(50, 0)
+        ok, msg = await drone.can_goto(target)
+        if ok:
+            await drone.goto_coordinates(target)
+        else:
+            print(f"Goto rejected: {msg}")
+
+        ok, msg = await drone.can_land()
+        if ok:
+            await drone.land()
+```
+
+### v2 behavior on connection failure
+
+| Environment | Server unreachable |
+|-------------|-------------------|
+| AERPAW (detected automatically) | Fatal error — script exits |
+| Non-AERPAW / SITL | Falls back to `NoOpSafetyChecker` (all validations pass; warning logged) |
+
+### Manual client construction (v2)
+
+You can also build the client manually and pass it to `connect()`:
+
+```python
+from aerpawlib.v2.safety import SafetyCheckerClient
+from aerpawlib.v2 import Drone
+
+client = SafetyCheckerClient("127.0.0.1", 14580)
+drone = await Drone.connect("udpin://127.0.0.1:14550", safety=client)
+
+ok, msg = await client.check_server_status()
+ok, msg = await client.validate_takeoff(10, lat, lon)
+ok, msg = await client.validate_waypoint(current_pos, target_pos)
+ok, msg = await client.validate_change_speed(8.0)
+ok, msg = await client.validate_landing(lat, lon)
+client.close()
+```
+
+## Configuration file format
+
+The YAML configuration file describes vehicle limits and geofence file paths. KML paths are resolved relative to the YAML file location.
+
+```yaml
+# geofence_config.yaml
+vehicle_type: copter       # "copter" or "rover"
+max_speed: 15              # m/s
+min_speed: 0.5             # m/s
+max_alt: 120               # meters AGL (copter only)
+min_alt: 5                 # meters AGL (copter only)
+include_geofences:         # vehicle must stay within at least one of these
+  - flight_area.kml
+exclude_geofences:         # no-go zones; vehicle must not enter
+  - building_1.kml
+  - restricted_zone.kml
+```
+
+<Note>
+`max_alt` and `min_alt` are only required (and only checked) for `vehicle_type: copter`. Rover configs do not need altitude fields.
+</Note>
+
+## KML geofence file format
+
+Geofences are KML files containing a `<Polygon>` element with `<coordinates>` in `longitude,latitude,altitude` order. The closing point must repeat the first.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <Placemark>
+      <name>Flight Area</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -78.700,35.720,0
+              -78.690,35.720,0
+              -78.690,35.730,0
+              -78.700,35.730,0
+              -78.700,35.720,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>
+```
+
+<Tip>
+Coordinates are in `lon,lat,alt` order (GIS convention), not `lat,lon`. The altitude component is ignored by the geofence logic.
+</Tip>
+
+## Running both server and script together
+
+<Steps>
+  <Step title="Create your YAML config and KML files">
+    Write `geofence_config.yaml` referencing your KML polygon files.
+  </Step>
+  <Step title="Start the SafetyCheckerServer">
+    ```bash
+    python -m aerpawlib.v1.safety --port 14580 --vehicle_config geofence_config.yaml &
+    ```
+  </Step>
+  <Step title="Run your mission script">
+    ```bash
+    aerpawlib --script my_mission.py --conn udp:127.0.0.1:14550 --vehicle drone \
+      --no-aerpaw-environment
+    ```
+  </Step>
+</Steps>
+
+<Note>
+The v1 `SafetyCheckerServer` listens on a ZMQ REP socket and the client uses a ZMQ REQ socket. The server and client communicate over TCP on the configured port. `pyzmq` is required: `pip install pyzmq`.
+</Note>

@@ -1,0 +1,371 @@
+---
+title: "Mission Patterns"
+description: "Guides to the runner patterns available in aerpawlib: BasicRunner, StateMachine, timed states, background tasks, and pre-flight initialization."
+---
+
+aerpawlib provides three runner base classes that cover the most common mission structures. You subclass one of these, apply decorators to your methods, and aerpawlib handles the execution lifecycle.
+
+## BasicRunner
+
+Use `BasicRunner` for linear missions with a single entry point. Exactly one method must be decorated with `@entrypoint`.
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.runner import BasicRunner, entrypoint
+    from aerpawlib.v1.util import VectorNED
+    from aerpawlib.v1.vehicle import Drone
+
+    class SquareFlight(BasicRunner):
+        @entrypoint
+        async def run(self, drone: Drone):
+            await drone.takeoff(10)
+
+            start = drone.position
+            offsets = [
+                VectorNED(10, 0, 0),   # North
+                VectorNED(0, 10, 0),   # East
+                VectorNED(-10, 0, 0),  # South
+                VectorNED(0, -10, 0),  # West
+            ]
+            pos = start
+            for offset in offsets:
+                pos = pos + offset
+                await drone.goto_coordinates(pos)
+
+            await drone.goto_coordinates(start)
+            await drone.land()
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2 import BasicRunner, Drone, VectorNED, entrypoint
+
+    class SquareFlight(BasicRunner):
+        @entrypoint
+        async def run(self, drone: Drone):
+            await drone.takeoff(altitude=10)
+
+            start = drone.position
+            offsets = [
+                VectorNED(10, 0, 0),
+                VectorNED(0, 10, 0),
+                VectorNED(-10, 0, 0),
+                VectorNED(0, -10, 0),
+            ]
+            pos = start
+            for offset in offsets:
+                pos = pos + offset
+                await drone.goto_coordinates(pos)
+
+            await drone.goto_coordinates(start)
+            await drone.land()
+    ```
+  </Tab>
+</Tabs>
+
+Run it:
+
+```bash
+aerpawlib --script my_mission.py --conn udp:127.0.0.1:14550 --vehicle drone \
+  --no-aerpaw-environment
+```
+
+## StateMachine
+
+Use `StateMachine` when your mission has distinct phases. Each `@state` method returns the name of the next state, or `None` to stop.
+
+Exactly one state must have `first=True` to designate the initial state.
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.runner import StateMachine, state
+    from aerpawlib.v1.util import Coordinate, VectorNED
+    from aerpawlib.v1.vehicle import Drone
+
+    class PatrolMission(StateMachine):
+        def __init__(self):
+            self._patrol_count = 0
+            self._patrol_points = [
+                VectorNED(20, 0, 0),
+                VectorNED(0, 20, 0),
+                VectorNED(-20, 0, 0),
+                VectorNED(0, -20, 0),
+            ]
+
+        @state(name="start", first=True)
+        async def start(self, drone: Drone):
+            await drone.takeoff(10)
+            return "patrol"
+
+        @state(name="patrol")
+        async def patrol(self, drone: Drone):
+            offset = self._patrol_points[self._patrol_count % len(self._patrol_points)]
+            await drone.goto_coordinates(drone.position + offset)
+            self._patrol_count += 1
+            if self._patrol_count >= 4:
+                return "land"
+            return "patrol"
+
+        @state(name="land")
+        async def land_state(self, drone: Drone):
+            await drone.land()
+            return None  # terminates the state machine
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2 import StateMachine, Drone, VectorNED, state
+
+    class PatrolMission(StateMachine):
+        def __init__(self):
+            super().__init__()
+            self._patrol_count = 0
+            self._patrol_points = [
+                VectorNED(20, 0, 0),
+                VectorNED(0, 20, 0),
+                VectorNED(-20, 0, 0),
+                VectorNED(0, -20, 0),
+            ]
+
+        @state(name="start", first=True)
+        async def start(self, drone: Drone):
+            await drone.takeoff(altitude=10)
+            return "patrol"
+
+        @state(name="patrol")
+        async def patrol(self, drone: Drone):
+            offset = self._patrol_points[self._patrol_count % len(self._patrol_points)]
+            await drone.goto_coordinates(drone.position + offset)
+            self._patrol_count += 1
+            if self._patrol_count >= 4:
+                return "land"
+            return "patrol"
+
+        @state(name="land")
+        async def land_state(self, drone: Drone):
+            await drone.land()
+            return None
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+The `StateMachine.stop()` method is equivalent to returning `None` from a state — it sets `_running = False` after the current state completes.
+</Note>
+
+## @background — parallel tasks
+
+`@background` methods run concurrently with the state machine from the moment the first state starts. They are automatically cancelled when the state machine stops.
+
+If a background task raises an exception, it is restarted automatically (with exponential backoff in v2). A typical use case is telemetry logging:
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.runner import StateMachine, state, background
+    from aerpawlib.v1.vehicle import Vehicle
+    import asyncio
+    import csv
+    import datetime
+
+    class LoggingMission(StateMachine):
+        def initialize_args(self, extra_args):
+            self._log_file = open("flight_log.csv", "a")
+            self._writer = csv.writer(self._log_file)
+
+        @background
+        async def log_position(self, vehicle: Vehicle):
+            # Runs in parallel with the state machine
+            pos = vehicle.position
+            self._writer.writerow([
+                datetime.datetime.now(),
+                pos.lat, pos.lon, pos.alt,
+                vehicle.battery.voltage,
+            ])
+            self._log_file.flush()
+            await asyncio.sleep(1.0)  # 1 Hz logging
+
+        @background
+        async def battery_monitor(self, vehicle: Vehicle):
+            while True:
+                if vehicle.battery.level < 20:
+                    print("Warning: low battery!")
+                await asyncio.sleep(5)
+
+        @state(name="fly", first=True)
+        async def fly(self, drone):
+            await drone.takeoff(10)
+            await drone.goto_coordinates(drone.position + VectorNED(30, 0))
+            return "land"
+
+        @state(name="land")
+        async def land_state(self, drone):
+            await drone.land()
+            return None
+
+        def cleanup(self):
+            self._log_file.close()
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2 import StateMachine, Drone, VectorNED, state, background
+    import asyncio
+
+    class LoggingMission(StateMachine):
+        @background
+        async def battery_monitor(self, drone: Drone):
+            while True:
+                if drone.battery.level < 20:
+                    print(f"Low battery: {drone.battery.level}%")
+                await asyncio.sleep(5)
+
+        @state(name="fly", first=True)
+        async def fly(self, drone: Drone):
+            await drone.takeoff(altitude=10)
+            await drone.goto_coordinates(drone.position + VectorNED(30, 0))
+            return "land"
+
+        @state(name="land")
+        async def land_state(self, drone: Drone):
+            await drone.land()
+            return None
+    ```
+  </Tab>
+</Tabs>
+
+The `squareoff_logging.py` example in `examples/v1/` shows a complete pattern: `@background` logs GPS data at a configurable sample rate while the state machine executes each leg of a square.
+
+## @timed_state — fixed-duration states
+
+`@timed_state(name, duration, loop=False, first=False)` causes the runner to remain in a state for exactly `duration` seconds before advancing.
+
+- If `loop=False` (default): the decorated method is called once, then the runner waits for the duration to elapse.
+- If `loop=True`: the method is called repeatedly (on every state-machine tick) until the duration expires.
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.runner import StateMachine, state, timed_state
+
+    class HoverMission(StateMachine):
+        @state(name="takeoff", first=True)
+        async def takeoff(self, drone):
+            await drone.takeoff(10)
+            return "hover"
+
+        @timed_state(name="hover", duration=30.0, loop=True)
+        async def hover(self, drone):
+            # Called every tick for 30 seconds
+            print(f"Hovering at {drone.position.alt:.1f}m")
+            return "land"
+
+        @state(name="land")
+        async def land_state(self, drone):
+            await drone.land()
+            return None
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2 import StateMachine, Drone, state, timed_state
+
+    class HoverMission(StateMachine):
+        def __init__(self):
+            super().__init__()
+
+        @state(name="takeoff", first=True)
+        async def takeoff(self, drone: Drone):
+            await drone.takeoff(altitude=10)
+            return "hover"
+
+        @timed_state(name="hover", duration=30.0, loop=True)
+        async def hover(self, drone: Drone):
+            print(f"Hovering at {drone.position.alt:.1f}m")
+            return "land"
+
+        @state(name="land")
+        async def land_state(self, drone: Drone):
+            await drone.land()
+            return None
+    ```
+  </Tab>
+</Tabs>
+
+## @at_init — pre-flight initialization (v2 only)
+
+`@at_init` methods run sequentially before the vehicle is armed and before the first state starts. Use them for one-time setup that requires vehicle telemetry (e.g. reading home position) but must complete before the mission begins.
+
+Multiple `@at_init` methods are run in the order they are defined.
+
+```python
+from aerpawlib.v2 import StateMachine, Drone, state, at_init
+
+class SurveyMission(StateMachine):
+    def __init__(self):
+        super().__init__()
+        self._home = None
+
+    @at_init
+    async def setup(self, drone: Drone):
+        # Runs once before arming
+        self._home = drone.home_coords
+        print(f"Home position: {self._home}")
+
+    @state(name="takeoff", first=True)
+    async def takeoff(self, drone: Drone):
+        await drone.takeoff(altitude=15)
+        return "survey"
+
+    @state(name="survey")
+    async def survey(self, drone: Drone):
+        # self._home is guaranteed to be set here
+        await drone.goto_coordinates(self._home)
+        return "land"
+
+    @state(name="land")
+    async def land_state(self, drone: Drone):
+        await drone.land()
+        return None
+```
+
+<Note>
+`@at_init` is only available in v2. In v1, perform initialization at the start of the first state instead.
+</Note>
+
+## Holding internal state
+
+Because runner classes are plain Python objects, you can hold any state as instance attributes:
+
+```python
+class MultiLegMission(StateMachine):
+    def __init__(self):
+        self._leg = 0
+        self._waypoints = [...]   # pre-populated list
+        self._log_file = None
+
+    def initialize_args(self, extra_args):
+        # Parse custom CLI arguments
+        ...
+
+    def cleanup(self):
+        # Called after the last state returns None
+        if self._log_file:
+            self._log_file.close()
+```
+
+`cleanup()` is called by the runner after the mission ends (regardless of success or error), making it the right place to close files or release resources.
+
+## Decorator summary
+
+| Decorator | Runner | Description |
+|-----------|--------|-------------|
+| `@entrypoint` | `BasicRunner` | Marks the single async entry point |
+| `@state(name, first=False)` | `StateMachine` | Defines a state; returns next state name or `None` |
+| `@timed_state(name, duration, loop=False, first=False)` | `StateMachine` | State that runs for a fixed duration |
+| `@background` | `StateMachine` | Runs concurrently; restarted automatically on exception |
+| `@at_init` | `StateMachine` (v2 only) | Runs once before arm and before the first state |
+| `@expose_zmq(name)` | `ZmqStateMachine` | Exposes a state for remote ZMQ transitions |
+| `@expose_field_zmq(name)` | `ZmqStateMachine` | Exposes a method as a queryable ZMQ field |

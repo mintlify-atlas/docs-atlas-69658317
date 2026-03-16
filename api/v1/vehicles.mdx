@@ -1,0 +1,413 @@
+---
+title: "Vehicles"
+description: "Vehicle base class, Drone, Rover, and DummyVehicle — properties, methods, and connection options."
+---
+
+## Vehicle
+
+`Vehicle` is the abstract base class for all vehicle types. It manages the MAVSDK connection, telemetry subscriptions, and exposes common read-only properties. You do not instantiate `Vehicle` directly — use `Drone` or `Rover`.
+
+### Constructor
+
+```python
+from aerpawlib.v1 import Drone
+
+drone = Drone("udp://:14540")                  # SITL default
+drone = Drone("udp://:14540", mavsdk_server_port=50052)  # custom gRPC port
+```
+
+<ParamField path="connection_string" type="str" required>
+  MAVLink connection string. Supported schemes: `udp`, `udpin`, `udpout`, `tcp`, `tcpin`, `tcpout`, `serial`.
+
+  Examples:
+  - `"udp://:14540"` — listen on all interfaces, port 14540
+  - `"udpin://0.0.0.0:14550"` — explicit listen form
+  - `"serial:///dev/ttyUSB0:57600"` — serial at 57600 baud
+  - `"tcp://192.168.1.100:5760"` — TCP to autopilot
+</ParamField>
+
+<ParamField path="mavsdk_server_port" type="int">
+  Port for the embedded `mavsdk_server` gRPC interface. Each `Vehicle` instance must use a unique port. Defaults to `50051`.
+</ParamField>
+
+The constructor **blocks** until a heartbeat is received (up to 30 seconds) and raises `ConnectionTimeoutError` on failure.
+
+### Properties
+
+| Property | Type | Description |
+|---|---|---|
+| `connected` | `bool` | `True` if receiving MAVLink heartbeats |
+| `position` | `Coordinate` | Current position (lat, lon, altitude AGL in meters) |
+| `battery` | `_BatteryCompat` | Battery status object |
+| `gps` | `_GPSInfoCompat` | GPS status object |
+| `armed` | `bool` | `True` if the vehicle is currently armed |
+| `home_coords` | `Coordinate \| None` | Home / launch position from autopilot telemetry |
+| `home_amsl` | `float` | Home altitude Above Mean Sea Level (meters) |
+| `heading` | `float` | Current heading in degrees (0 = North, 90 = East) |
+| `velocity` | `VectorNED` | Current velocity in NED frame (m/s) |
+| `attitude` | `_AttitudeCompat` | Roll, pitch, yaw in radians |
+| `mode` | `str` | Current flight mode name e.g. `'GUIDED'`, `'HOLD'` |
+| `autopilot_info` | `_VersionCompat` | Autopilot firmware version info |
+
+### Methods
+
+#### `set_groundspeed`
+
+```python
+await vehicle.set_groundspeed(velocity)
+```
+
+Set the cruise speed used by the autopilot for `goto_coordinates` commands.
+
+<ParamField path="velocity" type="float" required>
+  Groundspeed in m/s.
+</ParamField>
+
+#### `set_armed`
+
+```python
+await vehicle.set_armed(value)
+```
+
+Arm or disarm the vehicle and wait for the state to be confirmed.
+
+<ParamField path="value" type="bool" required>
+  `True` to arm, `False` to disarm.
+</ParamField>
+
+#### `done_moving`
+
+```python
+ready = vehicle.done_moving()
+```
+
+Returns `True` if the previous movement command has been completed and the vehicle is ready for the next command. Also returns `False` if the vehicle is disconnected or has been aborted.
+
+#### `close`
+
+```python
+vehicle.close()
+```
+
+Clean up the vehicle connection — cancels all telemetry and command tasks, stops the MAVSDK event loop, and releases all resources. Called automatically by the runner on script exit.
+
+---
+
+## Drone
+
+`Drone` extends `Vehicle` for multirotor aircraft. Import:
+
+```python
+from aerpawlib.v1 import Drone
+```
+
+### takeoff
+
+```python
+await drone.takeoff(target_alt, min_alt_tolerance=0.95)
+```
+
+Arm the vehicle (if not already armed), command takeoff, and wait until the drone reaches at least `target_alt * min_alt_tolerance` meters AGL.
+
+<ParamField path="target_alt" type="float" required>
+  Target altitude Above Ground Level in meters.
+</ParamField>
+
+<ParamField path="min_alt_tolerance" type="float">
+  Fraction of `target_alt` that must be reached before this call returns. Defaults to `0.95` (i.e. 95% of target altitude).
+</ParamField>
+
+**Raises:** `TakeoffError` if the autopilot rejects the command.
+
+```python
+await drone.takeoff(10)           # take off to 10 m, wait until ≥ 9.5 m
+await drone.takeoff(20, min_alt_tolerance=0.9)  # wait until ≥ 18 m
+```
+
+### land
+
+```python
+await drone.land()
+```
+
+Command an in-place landing and wait for the drone to disarm.
+
+**Raises:** `LandingError` if the autopilot rejects the command.
+
+```python
+await drone.land()
+```
+
+### return_to_launch
+
+```python
+await drone.return_to_launch()
+```
+
+Command RTL and wait for the drone to land at the home position and disarm.
+
+**Raises:** `RTLError` if the autopilot rejects the command.
+
+### goto_coordinates
+
+```python
+await drone.goto_coordinates(coordinates, tolerance=2.0, target_heading=None, timeout=300.0)
+```
+
+Navigate to a target `Coordinate` and wait until the drone is within `tolerance` meters of it.
+
+<ParamField path="coordinates" type="Coordinate" required>
+  Target geographic position. Altitude is interpreted as AGL relative to the home position.
+</ParamField>
+
+<ParamField path="tolerance" type="float">
+  Acceptance radius in meters. The call returns when `coordinates.distance(drone.position) <= tolerance`. Defaults to `2.0`. Must be between `0.1` and `100.0`.
+</ParamField>
+
+<ParamField path="target_heading" type="float | None">
+  If provided, the drone will turn to this heading (degrees) before navigating and maintain it throughout the flight. `None` means the drone faces the direction of travel.
+</ParamField>
+
+<ParamField path="timeout" type="float">
+  Maximum time in seconds to wait for arrival. Defaults to `300.0`. Raises `NavigationError` on timeout.
+</ParamField>
+
+**Raises:** `NavigationError` if the autopilot rejects the command or the timeout is exceeded.
+
+```python
+from aerpawlib.v1 import Coordinate
+
+target = Coordinate(35.7275, -78.6960, 15)
+await drone.goto_coordinates(target)
+await drone.goto_coordinates(target, tolerance=5.0, target_heading=90)
+```
+
+### set_heading
+
+```python
+await drone.set_heading(heading, blocking=True, lock_in=True)
+```
+
+Command the drone to rotate to a specific compass heading.
+
+<ParamField path="heading" type="float | None" required>
+  Target heading in degrees (0 = North, 90 = East, 180 = South, 270 = West). Pass `None` to clear a previously locked heading.
+</ParamField>
+
+<ParamField path="blocking" type="bool">
+  If `True` (default), waits for the drone to finish turning before returning. If `False`, sends the command and returns immediately.
+</ParamField>
+
+<ParamField path="lock_in" type="bool">
+  If `True` (default), stores this heading internally so that subsequent `goto_coordinates` commands maintain it. Set to `False` for a one-shot rotation.
+</ParamField>
+
+```python
+await drone.set_heading(90)            # face east, wait for completion
+await drone.set_heading(180, lock_in=False)  # face south, no lock
+await drone.set_heading(None)          # clear locked heading
+```
+
+### set_velocity
+
+```python
+await drone.set_velocity(velocity_vector, global_relative=True, duration=None)
+```
+
+Command the drone to fly with a specific velocity vector using MAVSDK offboard mode.
+
+<ParamField path="velocity_vector" type="VectorNED" required>
+  Desired velocity in m/s expressed as a `VectorNED(north, east, down)`. Negative `down` means upward.
+</ParamField>
+
+<ParamField path="global_relative" type="bool">
+  If `True` (default), the vector is in the world-aligned NED frame. If `False`, it is relative to the drone's current heading.
+</ParamField>
+
+<ParamField path="duration" type="float | None">
+  How long to hold this velocity in seconds. After `duration` the velocity is zeroed and offboard mode is exited. If `None`, the velocity is maintained until the next movement command.
+</ParamField>
+
+**Raises:** `VelocityError` if offboard mode cannot be started.
+
+```python
+from aerpawlib.v1 import VectorNED
+
+# fly north at 5 m/s for 10 seconds
+await drone.set_velocity(VectorNED(5, 0, 0), duration=10)
+
+# fly east relative to drone's current heading
+await drone.set_velocity(VectorNED(0, 3, 0), global_relative=False, duration=5)
+```
+
+---
+
+## Rover
+
+`Rover` extends `Vehicle` for ground vehicles. The API is a subset of `Drone` — it navigates in 2-D and does not support `takeoff`, `land`, `set_heading`, or altitude in `set_velocity`.
+
+```python
+from aerpawlib.v1 import Rover
+
+rover = Rover("udp://:14540")
+```
+
+### goto_coordinates
+
+```python
+await rover.goto_coordinates(coordinates, tolerance=2.1, target_heading=None, timeout=300.0)
+```
+
+Navigate to a target coordinate. The rover uses **ground distance** (2-D) to determine when it has arrived. The `target_heading` parameter is accepted for API compatibility but is currently ignored.
+
+<ParamField path="coordinates" type="Coordinate" required>
+  Target position. The altitude field is ignored; the rover always navigates at home altitude.
+</ParamField>
+
+<ParamField path="tolerance" type="float">
+  Acceptance radius in meters. Defaults to `2.1` (slightly larger than drone default to account for rover GPS accuracy).
+</ParamField>
+
+<ParamField path="target_heading" type="float | None">
+  Currently ignored for rovers. Accepted for API compatibility with `Drone`.
+</ParamField>
+
+<ParamField path="timeout" type="float | None">
+  Maximum seconds to wait. Defaults to `300.0`.
+</ParamField>
+
+### set_velocity
+
+```python
+await rover.set_velocity(velocity_vector, global_relative=True, duration=None)
+```
+
+Identical interface to `Drone.set_velocity`. The vertical (`down`) component of `velocity_vector` is always **zeroed** since rovers are ground vehicles.
+
+<Note>
+Rovers require GUIDED mode (ArduPilot mode 15) before they can be armed via MAVLink. The `Rover` class handles this mode switch automatically in `_preflight_wait`.
+</Note>
+
+---
+
+## DummyVehicle
+
+`DummyVehicle` is a no-op placeholder for scripts that orchestrate other processes or use ZMQ but do not need to control a physical vehicle.
+
+```python
+from aerpawlib.v1 import DummyVehicle
+
+vehicle = DummyVehicle()
+```
+
+It exposes the same `_preflight_wait` and `_arm_vehicle` hooks as `Vehicle` but all implementations are empty. It has no properties or movement methods.
+
+---
+
+## Compatibility objects
+
+These objects are returned by `Vehicle` properties and match the field names of the original DroneKit interface. They do **not** inherit from DroneKit classes.
+
+### `_BatteryCompat` (returned by `vehicle.battery`)
+
+| Field | Type | Description |
+|---|---|---|
+| `voltage` | `float` | Battery voltage in volts |
+| `current` | `float` | Current draw in amps |
+| `level` | `int` | Remaining charge as a percentage (0–100) |
+
+### `_GPSInfoCompat` (returned by `vehicle.gps`)
+
+| Field | Type | Description |
+|---|---|---|
+| `fix_type` | `int` | GPS fix type: 0–1 = no fix, 2 = 2-D fix, 3 = 3-D fix |
+| `satellites_visible` | `int` | Number of visible satellites |
+
+### `_AttitudeCompat` (returned by `vehicle.attitude`)
+
+All angles are in **radians**.
+
+| Field | Type | Description |
+|---|---|---|
+| `pitch` | `float` | Pitch angle (horizon-relative) |
+| `roll` | `float` | Roll angle (horizon-relative) |
+| `yaw` | `float` | Yaw angle (world-relative, North = 0) |
+
+### `_VersionCompat` (returned by `vehicle.autopilot_info`)
+
+| Field | Type | Description |
+|---|---|---|
+| `major` | `int \| None` | Major firmware version |
+| `minor` | `int \| None` | Minor firmware version |
+| `patch` | `int \| None` | Patch firmware version |
+
+---
+
+## Examples
+
+<CodeGroup>
+```python Basic takeoff and land
+from aerpawlib.v1 import Drone, BasicRunner, entrypoint
+
+class SimpleFlight(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        print(f"Battery: {drone.battery.level}%")
+        print(f"GPS fix: {drone.gps.fix_type}")
+
+        await drone.takeoff(10)
+        print(f"Altitude: {drone.position.alt:.1f} m")
+        await drone.land()
+```
+
+```python Waypoint navigation with heading
+from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+
+class WaypointFlight(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        await drone.set_groundspeed(8)   # 8 m/s cruise speed
+        await drone.takeoff(15)
+
+        waypoints = [
+            Coordinate(35.7275, -78.6960, 15),
+            Coordinate(35.7280, -78.6955, 15),
+            Coordinate(35.7285, -78.6960, 15),
+        ]
+        for wp in waypoints:
+            await drone.goto_coordinates(wp, tolerance=3)
+
+        await drone.return_to_launch()
+```
+
+```python Velocity control
+from aerpawlib.v1 import Drone, VectorNED, BasicRunner, entrypoint
+import asyncio
+
+class VelocityFlight(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        await drone.takeoff(10)
+
+        await drone.set_velocity(VectorNED(5, 0, 0), duration=5)  # north
+        await drone.set_velocity(VectorNED(0, 5, 0), duration=5)  # east
+        await asyncio.sleep(2)  # hover
+
+        await drone.land()
+```
+
+```python Rover navigation
+from aerpawlib.v1 import Rover, Coordinate, BasicRunner, entrypoint
+
+class RoverMission(BasicRunner):
+    @entrypoint
+    async def run(self, rover: Rover):
+        waypoints = [
+            Coordinate(35.7275, -78.6960, 0),
+            Coordinate(35.7280, -78.6955, 0),
+        ]
+        for wp in waypoints:
+            await rover.goto_coordinates(wp)
+        print("Mission complete")
+```
+</CodeGroup>

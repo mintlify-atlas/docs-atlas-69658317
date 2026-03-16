@@ -1,0 +1,113 @@
+---
+title: "Introduction"
+description: "aerpawlib is AERPAW's Python library for autonomous vehicle control — drones, rovers, and multi-vehicle coordination via ArduPilot and MAVSDK."
+---
+
+<img
+  src="https://media.brand.dev/4456ce29-d627-4388-94b7-d3640cc0939c.png"
+  alt="AERPAW"
+  style={{ maxWidth: "280px", marginBottom: "2rem" }}
+/>
+
+## What is aerpawlib?
+
+**aerpawlib** is a Python library that gives you a clean, async-first interface for programming autonomous missions on real vehicles within the [AERPAW](https://aerpaw.org) research platform. It wraps MAVSDK and ArduPilot so you can focus on mission logic instead of low-level MAVLink plumbing.
+
+Whether you're flying a waypoint survey with a single drone, running a leader/follower multi-vehicle experiment, or testing with a software-in-the-loop simulator, aerpawlib provides the same API.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Async vehicle control" icon="drone">
+    Unified `Drone` and `Rover` classes with `await` commands for takeoff, navigation, velocity, and landing.
+  </Card>
+  <Card title="Mission runners" icon="play">
+    `BasicRunner` for linear scripts and `StateMachine` for event-driven, multi-phase missions with background tasks.
+  </Card>
+  <Card title="Multi-vehicle coordination" icon="network-wired">
+    `ZmqStateMachine` lets multiple vehicles communicate and trigger state transitions across processes.
+  </Card>
+  <Card title="Safety checker" icon="shield-check">
+    Built-in geofence validation with KML polygon support — validate waypoints, altitude, and speed before commanding vehicles.
+  </Card>
+  <Card title="QGC plan files" icon="map">
+    Load pre-planned missions directly from QGroundControl `.plan` files.
+  </Card>
+  <Card title="AERPAW platform integration" icon="satellite">
+    OEO logging, safety-pilot arming, checkpoints, and abort — everything needed for real AERPAW experiments.
+  </Card>
+  <Card title="Non-blocking commands" icon="bolt">
+    `VehicleTask` objects let you monitor progress, cancel, or await completion of navigation commands.
+  </Card>
+  <Card title="v1 & v2 APIs" icon="code-branch">
+    v1 maintains legacy API compatibility; v2 is a modern async-first redesign. Both are fully supported.
+  </Card>
+</CardGroup>
+
+## Quick example
+
+```python my_mission.py
+from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+
+class MyMission(BasicRunner):
+    @entrypoint
+    async def run(self, vehicle):
+        await vehicle.takeoff(10)
+        for wp in [
+            Coordinate(35.7275, -78.6960, 10),
+            Coordinate(35.7280, -78.6955, 10),
+        ]:
+            await vehicle.goto_coordinates(wp)
+        await vehicle.land()
+```
+
+```bash
+aerpawlib --script my_mission.py --conn udpin://127.0.0.1:14550 --vehicle drone
+```
+
+## Choose your API version
+
+<Tabs>
+  <Tab title="v1 (stable)">
+    The v1 API is fully stable and backward-compatible with legacy aerpawlib scripts. Use it for existing projects or when you need proven reliability.
+
+    ```python
+    from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint, StateMachine, state
+    ```
+
+    - Full ArduPilot Copter and Rover support
+    - Safety checker with geofence validation
+    - ZMQ multi-vehicle coordination
+    - All existing scripts work unchanged
+  </Tab>
+  <Tab title="v2 (modern)">
+    The v2 API is a ground-up async redesign with a single event loop, descriptor-based runners, `VehicleTask` for non-blocking commands, and built-in safety handling.
+
+    ```python
+    from aerpawlib.v2 import Drone, Coordinate, BasicRunner, entrypoint, VehicleTask
+    ```
+
+    - Single event loop — no threading overhead
+    - `VehicleTask` with `progress`, `cancel()`, `wait_done()`
+    - `@at_init` for pre-flight setup
+    - Typed exceptions with severity levels
+    - `MockVehicle` and `DummyVehicle` for testing
+  </Tab>
+</Tabs>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install aerpawlib and set up your development environment.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Write and run your first mission in under 5 minutes.
+  </Card>
+  <Card title="Mission patterns" icon="sitemap" href="/guides/mission-patterns">
+    Explore BasicRunner, StateMachine, and ZMQ coordination patterns.
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/v1/overview">
+    Full reference for every class, method, and decorator.
+  </Card>
+</CardGroup>

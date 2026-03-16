@@ -1,0 +1,413 @@
+---
+title: "Vehicles"
+description: "Vehicle base class, Drone, Rover, DummyVehicle, VehicleTask, and protocol interfaces."
+---
+
+## Vehicle (base class)
+
+`Vehicle` is the abstract base that `Drone` and `Rover` extend. It owns all telemetry properties, `connect()`, `set_armed()`, `set_groundspeed()`, `can_takeoff()`, `can_goto()`, `can_land()`, and `close()`.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `position` | `Coordinate` | Current position (lat, lon, alt AGL in metres) |
+| `home_coords` | `Optional[Coordinate]` | Home/launch position, or `None` before first fix |
+| `home_amsl` | `float` | Home altitude above mean sea level in metres |
+| `battery` | `Battery` | Battery telemetry (voltage, current, level %) |
+| `gps` | `GPSInfo` | GPS status (fix_type, satellites_visible) |
+| `armed` | `bool` | `True` if the vehicle is armed |
+| `heading` | `float` | Current heading in degrees [0, 360) |
+| `velocity` | `VectorNED` | Current velocity in m/s (NED frame) |
+| `attitude` | `Attitude` | Roll, pitch, yaw in **radians** |
+| `mode` | `str` | Current autopilot flight mode name |
+| `armable` | `bool` | `True` if pre-arm checks currently pass |
+| `connected` | `bool` | `True` if the connection is active and not closed |
+| `closed` | `bool` | `True` after `close()` has been called |
+
+### `Vehicle.connect()`
+
+```python
+@classmethod
+async def connect(
+    cls,
+    connection_string: str,
+    mavsdk_server_port: int = 50051,
+    *,
+    timeout: float = 30.0,
+    safety: Optional[SafetyCheckerClient | NoOpSafetyChecker] = None,
+) -> Vehicle
+```
+
+Connect to a vehicle and start telemetry subscriptions.
+
+<ParamField path="connection_string" type="str" required>
+  MAVLink connection string, e.g. `udpin://127.0.0.1:14550`, `tcpin://host:port`, or `serial:///dev/ttyS0`.
+</ParamField>
+
+<ParamField path="mavsdk_server_port" type="int">
+  gRPC port for the `mavsdk_server` process. Default `50051`.
+</ParamField>
+
+<ParamField path="timeout" type="float">
+  Maximum seconds to wait for a heartbeat. Default `30.0`.
+</ParamField>
+
+<ParamField path="safety" type="SafetyCheckerClient | NoOpSafetyChecker | None">
+  Optional safety checker used by `can_takeoff`, `can_goto`, and `can_land`. When `None` only local checks run.
+</ParamField>
+
+Raises `ConnectionTimeoutError` if no heartbeat is received within `timeout`.
+
+### `Vehicle.can_takeoff()`
+
+```python
+async def can_takeoff(
+    self,
+    altitude: float,
+    min_battery_percent: float = 10.0,
+) -> Tuple[bool, str]
+```
+
+Local checks: armable, GPS 3D fix (`fix_type >= 3`), battery above `min_battery_percent`. If `vehicle.safety` is set, also calls `safety.validate_takeoff`.
+
+### `Vehicle.can_goto()`
+
+```python
+async def can_goto(
+    self,
+    target: Coordinate,
+    tolerance: float = 2.0,
+) -> Tuple[bool, str]
+```
+
+Validates that `tolerance` is within `[0.1, 100.0]` m. Forwards to `safety.validate_waypoint` if a checker is configured.
+
+### `Vehicle.can_land()`
+
+```python
+async def can_land(self) -> Tuple[bool, str]
+```
+
+Forwards to `safety.validate_landing` if a checker is configured; otherwise returns `(True, "")`.
+
+### `Vehicle.set_armed()`
+
+```python
+async def set_armed(self, value: bool) -> None
+```
+
+Arm (`True`) or disarm (`False`) the vehicle.
+
+<ParamField path="value" type="bool" required>
+  `True` to arm, `False` to disarm.
+</ParamField>
+
+Raises `NotArmableError` if arming is requested but pre-arm checks fail. Raises `ArmError` or `DisarmError` if the MAVLink command is rejected.
+
+### `Vehicle.set_groundspeed()`
+
+```python
+async def set_groundspeed(self, velocity: float) -> None
+```
+
+Set the maximum cruise speed in m/s.
+
+### `Vehicle.close()`
+
+```python
+def close(self) -> None
+```
+
+Cancel all telemetry and command tasks and release the MAVSDK connection. Safe to call multiple times.
+
+---
+
+## Drone
+
+`Drone` extends `Vehicle` for multirotors.
+
+```python
+from aerpawlib.v2 import Drone
+
+drone = await Drone.connect("udpin://127.0.0.1:14550")
+```
+
+### `Drone.takeoff()`
+
+```python
+async def takeoff(
+    self,
+    altitude: float,
+    min_alt_tolerance: float = 0.95,
+) -> None
+```
+
+Command the drone to take off to the target altitude. Waits until `position.alt >= altitude * min_alt_tolerance` before returning, then waits an additional stabilisation period.
+
+<ParamField path="altitude" type="float" required>
+  Target relative altitude in metres above the home point.
+</ParamField>
+
+<ParamField path="min_alt_tolerance" type="float">
+  Fraction of `altitude` that must be reached before takeoff is considered complete. Default `0.95`.
+</ParamField>
+
+Raises `TakeoffError` if the MAVSDK command fails.
+
+### `Drone.land()`
+
+```python
+async def land(self) -> None
+```
+
+Command the drone to land and wait until the vehicle disarms. Raises `LandingError` on failure or timeout.
+
+### `Drone.return_to_launch()`
+
+```python
+async def return_to_launch(self) -> None
+```
+
+Command Return-to-Launch (RTL) and wait until the vehicle disarms. Raises `RTLError` on failure.
+
+### `Drone.goto_coordinates()`
+
+```python
+async def goto_coordinates(
+    self,
+    coordinates: Coordinate,
+    tolerance: float = 2.0,
+    target_heading: Optional[float] = None,
+    timeout: float = 300.0,
+    blocking: bool = True,
+) -> Optional[VehicleTask]
+```
+
+Fly to the given coordinates.
+
+<ParamField path="coordinates" type="Coordinate" required>
+  Target position. `alt` is relative altitude in metres above the home point.
+</ParamField>
+
+<ParamField path="tolerance" type="float">
+  Arrival radius in metres. Must be in `[0.1, 100.0]`. Default `2.0`.
+</ParamField>
+
+<ParamField path="target_heading" type="float | None">
+  If provided, the drone faces this heading (degrees) before navigating.
+</ParamField>
+
+<ParamField path="timeout" type="float">
+  Maximum seconds to wait when `blocking=True`. Default `300`.
+</ParamField>
+
+<ParamField path="blocking" type="bool">
+  If `True` (default), awaits arrival before returning. If `False`, returns a `VehicleTask` handle immediately.
+</ParamField>
+
+Returns `None` when `blocking=True`, a `VehicleTask` when `blocking=False`. Cancellation on a non-blocking handle triggers RTL.
+
+```python
+# Blocking (default)
+await drone.goto_coordinates(Coordinate(35.727, -78.696, 20))
+
+# Non-blocking
+handle = await drone.goto_coordinates(target, blocking=False)
+print(handle.progress)   # 0.0 – 1.0
+handle.cancel()          # triggers RTL
+await handle.wait_done()
+```
+
+### `Drone.set_heading()`
+
+```python
+async def set_heading(
+    self,
+    heading: Optional[float],
+    blocking: bool = True,
+    lock_in: bool = True,
+) -> None
+```
+
+Command the drone to face a given heading.
+
+<ParamField path="heading" type="float | None" required>
+  Target heading in degrees `[0, 360)`. Pass `None` to clear the locked heading.
+</ParamField>
+
+<ParamField path="blocking" type="bool">
+  Wait until the heading is reached before returning. Default `True`.
+</ParamField>
+
+<ParamField path="lock_in" type="bool">
+  Store the heading so subsequent `goto_coordinates` calls maintain it. Default `True`.
+</ParamField>
+
+### `Drone.set_velocity()`
+
+```python
+async def set_velocity(
+    self,
+    velocity: VectorNED,
+    global_relative: bool = True,
+    duration: Optional[float] = None,
+) -> None
+```
+
+Enter offboard mode and hold the given NED velocity setpoint.
+
+<ParamField path="velocity" type="VectorNED" required>
+  Desired velocity in m/s (North, East, Down).
+</ParamField>
+
+<ParamField path="global_relative" type="bool">
+  If `True` (default), the vector is in the global NED frame. If `False`, it is rotated by the drone's current heading first.
+</ParamField>
+
+<ParamField path="duration" type="float | None">
+  Hold the velocity for this many seconds, then stop automatically. If `None`, the velocity runs until the next command or `stop_velocity()` is called.
+</ParamField>
+
+Raises `VelocityError` if offboard mode cannot be started.
+
+### `Drone.stop_velocity()`
+
+```python
+async def stop_velocity(self) -> None
+```
+
+Stop any active velocity command and exit offboard mode.
+
+### `Drone.can_takeoff()` / `can_goto()` / `can_land()`
+
+Inherited from `Vehicle` — see above.
+
+---
+
+## Rover
+
+`Rover` extends `Vehicle` for ground vehicles. Key differences:
+
+- Arrival uses **2D ground distance** (ignores altitude). Default tolerance is `2.1` m.
+- `set_velocity` zeroes the `down` component automatically.
+- Switches to ArduPilot GUIDED mode before arming.
+- No `takeoff`, `land`, `return_to_launch`, `set_heading`, or `stop_velocity`.
+
+### `Rover.goto_coordinates()`
+
+```python
+async def goto_coordinates(
+    self,
+    coordinates: Coordinate,
+    tolerance: float = 2.1,
+    target_heading: Optional[float] = None,
+    timeout: float = 300.0,
+    blocking: bool = True,
+) -> Optional[VehicleTask]
+```
+
+Same signature as `Drone.goto_coordinates` but `target_heading` is accepted and ignored (ground vehicles do not face a specific heading). Cancellation on a non-blocking handle triggers a hold command.
+
+### `Rover.set_velocity()`
+
+```python
+async def set_velocity(
+    self,
+    velocity_vector: VectorNED,
+    global_relative: bool = True,
+    duration: Optional[float] = None,
+) -> None
+```
+
+The `down` component of `velocity_vector` is always zeroed for ground vehicles.
+
+---
+
+## VehicleTask
+
+Handle returned by non-blocking commands such as `goto_coordinates(blocking=False)`.
+
+```python
+from aerpawlib.v2 import VehicleTask
+```
+
+### Properties and methods
+
+<ResponseField name="progress" type="float">
+  Progress estimate in the range `[0.0, 1.0]`.
+</ResponseField>
+
+<ResponseField name="is_done()" type="bool">
+  `True` when the command has completed, errored, or been cancelled.
+</ResponseField>
+
+<ResponseField name="is_cancelled()" type="bool">
+  `True` after `cancel()` has been called.
+</ResponseField>
+
+```python
+def cancel(self) -> None
+```
+
+Request cancellation. Invokes the on-cancel callback (e.g. RTL for drones, hold for rovers). Safe to call outside an async context, but the callback will not run if no event loop is active.
+
+```python
+async def wait_done(self) -> None
+```
+
+Await completion. Re-raises any error that occurred during the command.
+
+```python
+# Example
+handle = await drone.goto_coordinates(target, blocking=False)
+while not handle.is_done():
+    print(f"Progress: {handle.progress:.0%}")
+    await asyncio.sleep(1)
+await handle.wait_done()  # raises if error occurred
+```
+
+---
+
+## DummyVehicle
+
+No-op vehicle that implements the full `Vehicle` interface without making any MAVSDK calls. Useful for dry-run testing of complete runner pipelines.
+
+```python
+from aerpawlib.v2 import DummyVehicle
+
+vehicle = await DummyVehicle.connect()
+# goto_coordinates, can_takeoff, etc. all succeed silently
+```
+
+`DummyVehicle.connect()` accepts the same keyword arguments as `Vehicle.connect()` but ignores them all.
+
+---
+
+## Protocols
+
+### `GPSProtocol`
+
+Structural (`@runtime_checkable`) protocol for GPS-like objects.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `fix_type` | `int` | MAVLink GPS fix type (`0`–`1` no fix, `2` 2D, `3` 3D) |
+| `satellites_visible` | `int` | Number of visible satellites |
+
+### `VehicleProtocol`
+
+Structural (`@runtime_checkable`) protocol used by `ConnectionHandler` and `PreflightChecks`.
+
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
+| `connected` | `bool` | Connection active |
+| `armed` | `bool` | Vehicle armed |
+| `position` | `Coordinate` | Latest global position |
+| `home_coords` | `Optional[Coordinate]` | Home coordinate |
+| `battery` | `Battery` | Battery telemetry |
+| `gps` | `GPSInfo` | GPS telemetry |
+| `heading` | `float` | Heading in degrees |
+| `heartbeat_tick()` | `None` | Called when telemetry heartbeat is received |
+
+`MockVehicle` satisfies `VehicleProtocol` and is suitable for unit tests without hardware.

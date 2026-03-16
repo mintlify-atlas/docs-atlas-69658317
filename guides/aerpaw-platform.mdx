@@ -1,0 +1,192 @@
+---
+title: "AERPAW Platform Integration"
+description: "Use platform-specific features when running on AERPAW: OEO logging, checkpoints, safety pilot arming, and abort behavior."
+---
+
+When a script runs on the AERPAW platform, aerpawlib automatically detects the environment and enables additional infrastructure integration. Outside AERPAW (e.g. during local SITL development), the same calls are safely no-ops or log locally.
+
+## Detection
+
+aerpawlib detects the AERPAW environment by attempting a connection to the AERPAW forward server at startup. The result is stored in `AERPAW_Platform._connected`.
+
+- **In AERPAW**: `_connected = True` — platform features are enabled.
+- **Outside AERPAW**: `_connected = False` — OEO logging is silently skipped; checkpoint calls raise an exception.
+
+When running outside AERPAW, always pass `--no-aerpaw-environment` to the CLI. Without this flag, aerpawlib treats a failed platform connection as a fatal error and exits.
+
+```bash
+aerpawlib --script my_mission.py --conn udp:127.0.0.1:14550 --vehicle drone \
+  --no-aerpaw-environment
+```
+
+## AERPAW_Platform
+
+`AERPAW_Platform` is a singleton (v1: lazy proxy, v2: explicit singleton) that provides access to AERPAW infrastructure services.
+
+<Tabs>
+  <Tab title="v1">
+    ```python
+    from aerpawlib.v1.aerpaw import AERPAW_Platform
+
+    # AERPAW_Platform is a module-level singleton; access it directly
+    AERPAW_Platform.log_to_oeo("[aerpawlib] Mission started")
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```python
+    from aerpawlib.v2.aerpaw import AERPAW_Platform
+
+    # Instantiate once to trigger connection attempt
+    platform = AERPAW_Platform()
+    platform.log_to_oeo("[aerpawlib] Mission started")
+    ```
+  </Tab>
+</Tabs>
+
+## OEO logging
+
+Send messages to the AERPAW OEO console. Messages are always logged locally (to the aerpawlib logger); they are also forwarded to the OEO server when in the AERPAW environment.
+
+```python
+AERPAW_Platform.log_to_oeo(msg, severity="INFO", agent_id=None)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `msg` | `str` | required | Human-readable message |
+| `severity` | `str` | `"INFO"` | One of `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"` |
+| `agent_id` | `str` | node number from env | Identifier appended to the OEO request URL |
+
+```python
+from aerpawlib.v1.aerpaw import AERPAW_Platform
+
+# Basic info log
+AERPAW_Platform.log_to_oeo("[aerpawlib] Takeoff complete")
+
+# Severity levels
+AERPAW_Platform.log_to_oeo("Low battery warning", severity="WARNING")
+AERPAW_Platform.log_to_oeo("Navigation error", severity="ERROR")
+AERPAW_Platform.log_to_oeo("Connection lost", severity="CRITICAL")
+```
+
+<Tip>
+Prefix all OEO messages with `[aerpawlib]` or a script-specific tag to make them easy to filter in the OEO console.
+</Tip>
+
+## Checkpoints (v1)
+
+Checkpoints are a shared key-value store on the AERPAW platform. They allow multiple E-VM scripts to coordinate and signal progress.
+
+<Warning>
+Checkpoint calls raise an exception if called outside the AERPAW environment. Guard with `AERPAW_Platform._connected` or call them only during actual AERPAW experiments.
+</Warning>
+
+### Boolean checkpoints
+
+```python
+from aerpawlib.v1.aerpaw import AERPAW_Platform
+
+# Set a checkpoint (boolean flag = True)
+AERPAW_Platform.checkpoint_set("takeoff_complete")
+
+# Check if a checkpoint has been set
+if AERPAW_Platform.checkpoint_check("takeoff_complete"):
+    print("Takeoff was completed")
+
+# Reset all checkpoints at experiment start
+AERPAW_Platform.checkpoint_reset_server()
+```
+
+### Counter checkpoints
+
+```python
+# Increment a named counter
+AERPAW_Platform.checkpoint_increment_counter("waypoints_visited")
+
+# Read the counter value
+count = AERPAW_Platform.checkpoint_check_counter("waypoints_visited")
+print(f"Visited {count} waypoints")
+```
+
+### String checkpoints
+
+```python
+# Store a string value
+AERPAW_Platform.checkpoint_set_string("current_phase", "survey")
+
+# Retrieve it
+phase = AERPAW_Platform.checkpoint_check_string("current_phase")
+```
+
+## OEO topic publishing (v1)
+
+Publish structured data to user-defined OEO topics for real-time monitoring in the OEO console:
+
+```python
+# Publish to oeo/user/radio_script/snr
+AERPAW_Platform.publish_user_oeo_topic(
+    value="-65.3",
+    topic="radio_script/snr",
+)
+
+# With explicit agent ID
+AERPAW_Platform.publish_user_oeo_topic(
+    value=str(drone.position.alt),
+    topic="drone/altitude",
+    agent_id="node-1",
+)
+```
+
+The `topic` string uses `/` to indicate hierarchy. In the OEO console, add `radio_script` to see all sub-topics under it.
+
+## Safety pilot arming vs. auto-arm
+
+aerpawlib changes its arming behavior depending on whether it detects the AERPAW environment:
+
+| Environment | Arming behavior |
+|-------------|----------------|
+| **AERPAW** (detected) | Script waits for a human safety pilot to arm the vehicle manually. The vehicle will not arm itself. |
+| **Standalone / SITL** (`--no-aerpaw-environment`) | Script arms the vehicle automatically once it reaches an armable state (GPS fix, pre-arm checks passing). |
+
+During AERPAW flights the pre-flight wait also checks `vehicle.armable` and waits for GPS 3D fix before handing off to the first state or entrypoint.
+
+## vehicle._abort()
+
+`vehicle._abort()` immediately stops all movement and, if connected to the AERPAW platform, sends a CRITICAL message to the OEO console. It is intended for emergency stops.
+
+```python
+# In a background task
+@background
+async def safety_monitor(self, vehicle):
+    while True:
+        if some_failure_condition():
+            AERPAW_Platform.log_to_oeo(
+                "[aerpawlib] Aborting: failure condition detected",
+                severity="CRITICAL",
+            )
+            vehicle._abort()
+            return
+        await asyncio.sleep(1)
+```
+
+## Detecting the environment in your script
+
+```python
+from aerpawlib.v1.aerpaw import AERPAW_Platform
+
+# Force initialisation of the lazy proxy
+if AERPAW_Platform._connected:
+    print("Running on AERPAW platform")
+    AERPAW_Platform.checkpoint_reset_server()
+else:
+    print("Running in standalone / SITL mode")
+```
+
+## Connection architecture
+
+The AERPAW forward server is the communication bridge between E-VM scripts and AERPAW infrastructure services. aerpawlib pings it at startup:
+
+- **Default address**: `192.168.32.25:12435` (or the value of the `AP_EXPENV_OEOCVM_XM` environment variable).
+- **Agent ID default**: The `AP_EXPENV_THIS_CONTAINER_EXP_NODE_NUM` environment variable (set automatically on AERPAW nodes).
+
+These environment variables are set by the AERPAW platform when a script is launched in an experiment. You do not need to set them manually.

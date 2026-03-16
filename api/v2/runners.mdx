@@ -1,0 +1,345 @@
+---
+title: "Runners"
+description: "Runner base classes, StateMachine, ZmqStateMachine, config dataclasses, and all decorators."
+---
+
+Runners are the execution framework for aerpawlib v2 scripts. They receive a connected vehicle and orchestrate mission logic.
+
+## Runner (base class)
+
+```python
+from aerpawlib.v2 import Runner
+```
+
+Base class with three optional override points:
+
+```python
+class Runner:
+    async def run(self, vehicle: Vehicle) -> None: ...
+    def initialize_args(self, args: list[str]) -> None: ...
+    def cleanup(self) -> None: ...
+```
+
+| Method | Description |
+|--------|-------------|
+| `run(vehicle)` | Core mission logic. Awaited by the CLI. |
+| `initialize_args(args)` | Parse extra CLI arguments passed after `--`. |
+| `cleanup()` | Called on exit (success or failure). |
+
+---
+
+## BasicRunner
+
+Single entry-point runner. Exactly one method must be decorated with `@entrypoint`.
+
+```python
+from aerpawlib.v2 import BasicRunner, Drone, entrypoint
+
+class MyMission(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        await drone.takeoff(altitude=10)
+        await drone.goto_coordinates(drone.position + VectorNED(20, 0))
+        await drone.land()
+```
+
+Raises `NoEntrypointError` if no `@entrypoint` is declared.
+
+Alternatively, use an explicit config dataclass:
+
+```python
+from aerpawlib.v2 import BasicRunner, BasicRunnerConfig
+
+class MyMission(BasicRunner):
+    config = BasicRunnerConfig(entrypoint="run")
+
+    async def run(self, drone):
+        ...
+```
+
+---
+
+## StateMachine
+
+State-based runner. States are methods decorated with `@state` or `@timed_state`.
+
+```python
+from aerpawlib.v2 import StateMachine, Drone, state, timed_state, background, at_init
+import asyncio
+
+class MyMission(StateMachine):
+    @at_init
+    async def setup(self, drone: Drone):
+        print(f"Home: {drone.home_coords}")
+
+    @state(name="start", first=True)
+    async def start(self, drone: Drone):
+        await drone.takeoff(10)
+        return "fly"
+
+    @timed_state(name="fly", duration=10, loop=True)
+    async def fly(self, drone: Drone):
+        print(drone.position)
+        return "land"
+
+    @state(name="land")
+    async def land(self, drone: Drone):
+        await drone.land()
+        return None  # None terminates the machine
+
+    @background
+    async def monitor(self, drone: Drone):
+        while True:
+            print(drone.battery)
+            await asyncio.sleep(5)
+```
+
+### `StateMachine.stop()`
+
+```python
+def stop(self) -> None
+```
+
+Request the state machine to stop after the current state completes.
+
+---
+
+## ZmqStateMachine
+
+Extends `StateMachine` with remote ZMQ control. Use `@expose_zmq` to make states triggerable from other runners, and `@expose_field_zmq` to make data queryable.
+
+```python
+from aerpawlib.v2 import ZmqStateMachine, Drone, state, expose_zmq, expose_field_zmq
+
+class RemoteMission(ZmqStateMachine):
+    @expose_zmq("fly")
+    @state(name="fly", first=True)
+    async def fly(self, drone: Drone):
+        await drone.takeoff(10)
+        return "land"
+
+    @state(name="land")
+    async def land(self, drone: Drone):
+        await drone.land()
+        return None
+
+    @expose_field_zmq("altitude")
+    async def get_altitude(self, drone: Drone):
+        return drone.position.alt
+```
+
+Run with `--zmq-identifier` and `--zmq-proxy-server`. Start the proxy first:
+
+```bash
+aerpawlib --run-proxy
+```
+
+### `ZmqStateMachine.transition_runner()`
+
+```python
+async def transition_runner(self, identifier: str, state_name: str) -> None
+```
+
+Send a ZMQ transition command to another runner.
+
+<ParamField path="identifier" type="str" required>
+  ZMQ identifier of the target runner (its `--zmq-identifier` value).
+</ParamField>
+
+<ParamField path="state_name" type="str" required>
+  Name of the state the target should transition into.
+</ParamField>
+
+### `ZmqStateMachine.query_field()`
+
+```python
+async def query_field(
+    self,
+    identifier: str,
+    field: str,
+    timeout: float = 30.0,
+) -> Any
+```
+
+Query an `@expose_field_zmq` value from another runner and return it.
+
+<ParamField path="identifier" type="str" required>
+  ZMQ identifier of the target runner.
+</ParamField>
+
+<ParamField path="field" type="str" required>
+  Name registered with `@expose_field_zmq`.
+</ParamField>
+
+<ParamField path="timeout" type="float">
+  Maximum seconds to wait for a reply. Default `30.0`. Raises `asyncio.TimeoutError` if exceeded.
+</ParamField>
+
+```python
+# Trigger a transition on another vehicle
+await self.transition_runner("vehicle-2", "land")
+
+# Read a field from another runner
+alt = await self.query_field("vehicle-2", "altitude")
+```
+
+---
+
+## Config dataclasses
+
+Config can be set explicitly instead of (or alongside) decorators.
+
+### `BasicRunnerConfig`
+
+```python
+@dataclass
+class BasicRunnerConfig:
+    entrypoint: str  # method name to call as entry point
+```
+
+### `StateMachineConfig`
+
+```python
+@dataclass
+class StateMachineConfig:
+    initial_state: str
+    states: List[StateSpec]
+    backgrounds: List[str]       # method names
+    at_init: List[str]           # method names
+```
+
+### `ZmqStateMachineConfig`
+
+```python
+@dataclass
+class ZmqStateMachineConfig(StateMachineConfig):
+    exposed_states: Dict[str, str]  # zmq_name -> state_name
+    exposed_fields: Dict[str, str]  # zmq_name -> method_name
+```
+
+### `StateSpec`
+
+Metadata for a single state, used inside `StateMachineConfig.states`.
+
+```python
+@dataclass
+class StateSpec:
+    name: str
+    method_name: str
+    first: bool = False
+    duration: float = 0.0
+    loop: bool = False
+```
+
+---
+
+## Decorators
+
+### `@entrypoint`
+
+Marks the single async entry point on a `BasicRunner`. Only one method per class may carry this decorator.
+
+```python
+@entrypoint
+async def run(self, drone: Drone): ...
+```
+
+### `@state`
+
+```python
+@state(name: str, first: bool = False)
+```
+
+Defines a named `StateMachine` state. The method must return the next state name as a `str`, or `None` to terminate.
+
+<ParamField path="name" type="str" required>
+  Unique state name (must not be empty).
+</ParamField>
+
+<ParamField path="first" type="bool">
+  If `True`, this is the initial state. Exactly one state must have `first=True`.
+</ParamField>
+
+### `@timed_state`
+
+```python
+@timed_state(name: str, duration: float, loop: bool = False, first: bool = False)
+```
+
+A state that remains active for `duration` seconds before advancing.
+
+<ParamField path="name" type="str" required>
+  Unique state name.
+</ParamField>
+
+<ParamField path="duration" type="float" required>
+  How long to remain in this state (seconds).
+</ParamField>
+
+<ParamField path="loop" type="bool">
+  If `True`, the method is called repeatedly every state-machine tick until the duration expires. If `False`, the method is called once and then the runner waits out the remainder.
+</ParamField>
+
+<ParamField path="first" type="bool">
+  Mark as the initial state.
+</ParamField>
+
+### `@background`
+
+Marks an async method to run concurrently throughout the state machine lifetime. Background tasks are started before the first state and cancelled when the runner finishes. If a background task raises an exception it is restarted with exponential back-off (max 10 retries).
+
+```python
+@background
+async def monitor(self, drone: Drone):
+    while True:
+        print(drone.position)
+        await asyncio.sleep(1)
+```
+
+### `@at_init`
+
+Marks an async method to run **once** before arming and before the first state. Multiple `@at_init` methods run sequentially in definition order.
+
+```python
+@at_init
+async def setup(self, drone: Drone):
+    print(f"Home: {drone.home_coords}")
+```
+
+### `@expose_zmq`
+
+```python
+@expose_zmq(name: str)
+```
+
+Exposes a `@state`-decorated method so another `ZmqStateMachine` can trigger a transition to it by name.
+
+<ParamField path="name" type="str" required>
+  ZMQ message name that triggers a transition to this state.
+</ParamField>
+
+Must be stacked with `@state` or `@timed_state`:
+
+```python
+@expose_zmq("fly")
+@state(name="fly", first=True)
+async def fly(self, drone): ...
+```
+
+### `@expose_field_zmq`
+
+```python
+@expose_field_zmq(name: str)
+```
+
+Exposes an async method so another `ZmqStateMachine` can query its return value via `query_field`.
+
+<ParamField path="name" type="str" required>
+  ZMQ field name used in `query_field` calls.
+</ParamField>
+
+```python
+@expose_field_zmq("altitude")
+async def get_altitude(self, drone: Drone):
+    return drone.position.alt
+```

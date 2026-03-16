@@ -1,0 +1,145 @@
+---
+title: "ZMQ Utilities"
+description: "ZMQ proxy, reachability check, and ZmqStateMachine inter-runner communication."
+---
+
+The v2 ZMQ layer connects multiple `ZmqStateMachine` runners so they can trigger state transitions and query live data across vehicles.
+
+## Architecture
+
+```
+ Runner A (PUB -> XSUB)     Runner B (PUB -> XSUB)
+         \                       /
+          \                     /
+      ZMQ Proxy (XSUB / XPUB)
+         /                     \
+        /                       \
+ Runner A (SUB <- XPUB)     Runner B (SUB <- XPUB)
+```
+
+Every `ZmqStateMachine` connects **both** a `PUB` socket (to the proxy's XSUB port `5570`) and a `SUB` socket (to the proxy's XPUB port `5571`). Messages are addressed by `identifier` so runners only process messages destined for them.
+
+Start the proxy in a separate process before any runners:
+
+```bash
+aerpawlib --run-proxy
+```
+
+---
+
+## `run_zmq_proxy()`
+
+```python
+from aerpawlib.v2 import run_zmq_proxy
+
+run_zmq_proxy()
+```
+
+Start a ZMQ XSUB/XPUB forwarder proxy. **Blocking** — run in a dedicated process or thread.
+
+The proxy binds:
+- Port `5570` — XSUB (runners publish here)
+- Port `5571` — XPUB (runners subscribe here)
+
+---
+
+## `check_zmq_proxy_reachable()`
+
+```python
+from aerpawlib.v2 import check_zmq_proxy_reachable
+
+reachable = check_zmq_proxy_reachable(proxy_addr="127.0.0.1", timeout_s=2.0)
+```
+
+Attempt a TCP connection to the proxy's XPUB port (`5571`). Returns `True` if the proxy accepts the connection within `timeout_s`.
+
+<ParamField path="proxy_addr" type="str" required>
+  Hostname or IP of the ZMQ proxy host.
+</ParamField>
+
+<ParamField path="timeout_s" type="float">
+  Connection attempt timeout in seconds. Default `2.0`.
+</ParamField>
+
+Returns `True` if reachable, `False` otherwise (does not raise).
+
+---
+
+## `@expose_zmq` and `@expose_field_zmq`
+
+See [Runners — Decorators](/api/v2/runners#expose_zmq) for the full decorator reference.
+
+### Quick reference
+
+```python
+# Expose a state as a ZMQ transition target
+@expose_zmq("fly")          # another runner calls: await self.transition_runner("drone-1", "fly")
+@state(name="fly", first=True)
+async def fly(self, drone: Drone):
+    ...
+
+# Expose a live value
+@expose_field_zmq("altitude")   # another runner calls: await self.query_field("drone-1", "altitude")
+async def get_altitude(self, drone: Drone):
+    return drone.position.alt
+```
+
+---
+
+## Multi-vehicle example
+
+```python
+# vehicle_1.py  (ZmqStateMachine, identifier "drone-1")
+class Vehicle1(ZmqStateMachine):
+    @expose_zmq("land")
+    @state(name="land", first=True)
+    async def land(self, drone: Drone):
+        await drone.land()
+        return None
+
+    @expose_field_zmq("altitude")
+    async def get_altitude(self, drone: Drone):
+        return drone.position.alt
+
+
+# vehicle_2.py  (ZmqStateMachine, identifier "drone-2")
+class Vehicle2(ZmqStateMachine):
+    @state(name="start", first=True)
+    async def start(self, drone: Drone):
+        # Read drone-1's altitude
+        alt = await self.query_field("drone-1", "altitude")
+        print(f"drone-1 altitude: {alt}m")
+
+        # Tell drone-1 to land
+        await self.transition_runner("drone-1", "land")
+        return None
+```
+
+Start both runners with matching `--zmq-proxy-server` and different `--zmq-identifier` values:
+
+```bash
+# Terminal 1 — proxy
+aerpawlib --run-proxy
+
+# Terminal 2 — drone-1
+aerpawlib --api-version v2 --script vehicle_1.py --vehicle drone --conn udpin://... \
+  --zmq-identifier drone-1 --zmq-proxy-server 127.0.0.1
+
+# Terminal 3 — drone-2
+aerpawlib --api-version v2 --script vehicle_2.py --vehicle drone --conn udpin://... \
+  --zmq-identifier drone-2 --zmq-proxy-server 127.0.0.1
+```
+
+---
+
+## ZMQ message protocol
+
+Messages are Python objects serialised with `zmq.send_pyobj` / `recv_pyobj` (pickle). Each message is a `dict` with at minimum:
+
+| Key | Description |
+|-----|-------------|
+| `msg_type` | `"state_transition"`, `"field_request"`, or `"field_callback"` |
+| `identifier` | Destination runner identifier |
+| `from` | Sender runner identifier |
+
+Additional fields vary by type; user code does not need to construct these dicts directly — use `transition_runner()` and `query_field()`.

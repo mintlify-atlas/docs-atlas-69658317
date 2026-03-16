@@ -1,0 +1,115 @@
+---
+title: "Installation"
+description: "Install aerpawlib for production use or local SITL development."
+---
+
+aerpawlib requires **Python 3.9 or later** and works on Linux, macOS, and Windows.
+
+## Basic install
+
+<Steps>
+  <Step title="Clone or obtain the repository">
+    ```bash
+    git clone https://github.com/quantumbagel/aerpawlib.git
+    cd aerpawlib
+    ```
+  </Step>
+
+  <Step title="Install the package">
+    ```bash
+    pip install -e .
+    ```
+
+    This installs the `aerpawlib` CLI entry point and all runtime dependencies.
+  </Step>
+
+  <Step title="Verify the install">
+    ```bash
+    aerpawlib --help
+    ```
+
+    You should see the aerpawlib argument reference printed to your terminal.
+  </Step>
+</Steps>
+
+## Install options
+
+<CodeGroup>
+
+```bash Basic install
+# Runtime dependencies only — use when connecting to a real vehicle
+pip install -e .
+```
+
+```bash Dev install (with SITL)
+# Adds pytest, simulation tools, and ArduPilot SITL support
+pip install -e .[dev]
+aerpawlib-setup-sitl
+```
+
+```bash One-liner script
+# Equivalent to dev install — runs pip install -e .[dev] then setup-sitl
+./scripts/install_dev.sh
+```
+
+</CodeGroup>
+
+<Tip>
+  The `aerpawlib-setup-sitl` command compiles ArduPilot SITL binaries for both
+  Copter and Rover on your machine. This takes several minutes on the first run.
+  Once complete, you can simulate a drone or rover locally without any hardware.
+</Tip>
+
+## Dependencies
+
+### Core runtime
+
+These packages are installed with every `pip install -e .`:
+
+| Package | Version | Purpose |
+|---|---|---|
+| `mavsdk` | ≥ 2.0.0 | MAVLink vehicle control (v2 API) |
+| `dronekit` | ≥ 2.9.2 | MAVLink vehicle control (v1 API) |
+| `pymavlink` | ≥ 2.4.0 | Low-level MAVLink protocol |
+| `pyzmq` | ≥ 25.0.0 | ZMQ multi-vehicle coordination |
+| `pyserial` | ≥ 3.5 | Serial port connections |
+| `aiohttp` | ≥ 3.12.14 | Async HTTP client |
+| `pykml` | ≥ 0.2.0 | KML geofence parsing |
+| `shapely` | ≥ 2.0.0 | Geometry for safety checks |
+| `pyyaml` | ≥ 6.0 | YAML configuration files |
+| `requests` | ≥ 2.32.4 | HTTP requests |
+
+### Dev / SITL extras
+
+Installed with `pip install -e .[dev]`:
+
+| Package | Purpose |
+|---|---|
+| `pytest` + `pytest-asyncio` | Unit and integration testing |
+| `psutil` | Process monitoring in tests |
+| `MAVProxy` | Ground control proxy for SITL |
+| `pexpect` | SITL process automation |
+| `dronecan` | DroneCAN protocol support |
+| `msgspec` | Fast serialization for SITL tooling |
+| `empy` | ArduPilot build template engine |
+| `future` | Python 2/3 compatibility shim (ArduPilot) |
+
+<Note>
+  The `sitl` extra (pulled in by `dev`) does not include the ArduPilot source or
+  binaries themselves. Run `aerpawlib-setup-sitl` after the pip install to
+  download, compile, and register the SITL executables.
+</Note>
+
+## Python version support
+
+aerpawlib is tested against Python 3.9 through 3.14. The recommended version for
+new projects is **Python 3.11** or later for best async performance.
+
+```
+3.9  ✓ minimum supported
+3.10 ✓
+3.11 ✓ recommended
+3.12 ✓
+3.13 ✓
+3.14 ✓
+```

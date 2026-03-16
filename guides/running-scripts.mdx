@@ -1,0 +1,200 @@
+---
+title: "Running Scripts"
+description: "How to use the aerpawlib CLI to run mission scripts against real vehicles, rovers, and SITL."
+---
+
+The `aerpawlib` command is the primary way to execute mission scripts. It connects to a vehicle, loads your runner class, and manages initialization, execution, and post-flight cleanup.
+
+## Basic usage
+
+```bash
+aerpawlib --script <path/to/script.py> --conn <connection-string> --vehicle <type> [options]
+```
+
+**Example:**
+
+```bash
+aerpawlib --script examples/v1/basic_example.py \
+  --conn udp:127.0.0.1:14550 \
+  --vehicle drone
+```
+
+## Core flags
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--script` | Yes | Path to the Python script file (e.g. `my_mission.py` or `examples/v1/basic_example.py`) |
+| `--conn` / `--connection` | Yes | MAVLink connection string (see formats below) |
+| `--vehicle` | Yes | Vehicle type: `drone`, `rover`, `none` (DummyVehicle), or `generic` |
+| `--api-version` | No | API version to use: `v1` or `v2` (default: `v1`) |
+| `--config` | No | Path to a JSON config file (see Config file section) |
+
+## Connection string formats
+
+<CodeGroup>
+
+```bash UDP (most common for SITL and GCS)
+# Receive on local port
+aerpawlib --conn udpin://127.0.0.1:14550 ...
+
+# Send to a specific host
+aerpawlib --conn udp://127.0.0.1:14550 ...
+
+# Short form (legacy SITL default)
+aerpawlib --conn udp:127.0.0.1:14550 ...
+```
+
+```bash Serial
+# Serial port with baud rate
+aerpawlib --conn serial:///dev/ttyUSB0:57600 ...
+
+# Serial port on macOS
+aerpawlib --conn serial:///dev/tty.usbserial-1410:115200 ...
+```
+
+```bash TCP
+aerpawlib --conn tcp://localhost:5760 ...
+```
+
+</CodeGroup>
+
+<Tip>
+When running two vehicles on the same host (e.g. leader/follower in SITL), use different ports per vehicle: `udpin://127.0.0.1:14550` for the first and `udpin://127.0.0.1:14551` for the second.
+</Tip>
+
+## Vehicle types
+
+| Value | Class loaded | Description |
+|-------|-------------|-------------|
+| `drone` | `Drone` | ArduCopter — supports `takeoff`, `land`, `goto_coordinates`, `set_heading`, `set_velocity` |
+| `rover` | `Rover` | ArduRover — supports `goto_coordinates` and `set_velocity`; no takeoff/land |
+| `none` | `DummyVehicle` | No-op vehicle. Useful for scripts that coordinate via ZMQ but do not directly control a vehicle |
+| `generic` | `Vehicle` | Base vehicle class |
+
+## Execution flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--skip-init` | Off | Skip pre-flight initialization (GPS wait, armable check). Use with caution. |
+| `--skip-rtl` | Off | Do not automatically RTL/land if the vehicle is still armed when the script ends |
+| `--debug-dump` | Off | Enable verbose vehicle state logging (v1 only) |
+| `--no-aerpaw-environment` | Off | Run in standalone/SITL mode: skip AERPAW platform connection and allow auto-arm |
+| `--no-aerpawlib-stdout` | Off | Suppress aerpawlib output to stdout |
+
+<Warning>
+Without `--no-aerpaw-environment`, aerpawlib will attempt to connect to the AERPAW platform and exit with a critical error if it cannot. Always pass this flag when developing locally or against SITL.
+</Warning>
+
+## Logging flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-v` / `--verbose` | Off | Enable DEBUG level logging |
+| `-q` / `--quiet` | Off | Show WARNING level and above only (suppress INFO) |
+| `--log-file <path>` | None | Write all log output to a file in addition to the console |
+
+The default log level is INFO.
+
+## Connection tuning flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--conn-timeout` / `--connection-timeout` | `30.0` | Seconds to wait for the initial MAVLink connection |
+| `--heartbeat-timeout` | `5.0` | Seconds without a heartbeat before the connection is considered lost |
+| `--mavsdk-port` | `50051` | gRPC port for the embedded `mavsdk_server`. Use a unique port per vehicle process to avoid conflicts |
+
+## ZMQ multi-vehicle flags
+
+Required when running a `ZmqStateMachine` script. See the [Multi-Vehicle guide](/guides/multi-vehicle) for full setup.
+
+| Flag | Description |
+|------|-------------|
+| `--zmq-identifier <id>` | Unique name for this vehicle in the ZMQ network (e.g. `leader`, `follower`) |
+| `--zmq-proxy-server <addr>` | IP address of the ZMQ proxy host |
+| `--run-proxy` | Start the ZMQ proxy instead of running a script |
+
+## Safety checker flag
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--safety-checker-port <port>` | `14580` in AERPAW, `None` outside | Port for the `SafetyCheckerServer` (v2 only). If connection fails in AERPAW, aerpawlib exits; outside AERPAW it falls back to passthrough |
+
+## API version selection
+
+<Tabs>
+  <Tab title="v1 (default)">
+    ```bash
+    # v1 is the default; --api-version is optional
+    aerpawlib --script my_mission.py --conn udp:127.0.0.1:14550 --vehicle drone
+    aerpawlib --api-version v1 --script my_mission.py --conn udp:127.0.0.1:14550 --vehicle drone
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```bash
+    aerpawlib --api-version v2 --script my_mission.py \
+      --conn udpin://127.0.0.1:14550 --vehicle drone
+    ```
+
+    <Note>
+    v2 uses `udpin://` connection strings (MAVSDK `udpin` listener format) instead of the `udp:` format common in v1.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Config file (beta)
+
+Pass `--config <file.json>` to load arguments from a JSON file. CLI arguments override config file values.
+
+```json
+{
+  "script": "examples/v1/basic_example.py",
+  "conn": "udp:127.0.0.1:14550",
+  "vehicle": "drone",
+  "api-version": "v1",
+  "verbose": true,
+  "no-aerpaw-environment": true
+}
+```
+
+```bash
+aerpawlib --config mission.json
+```
+
+Boolean options set to `true` in JSON add the corresponding flag. Boolean options set to `false` are ignored (the default behavior is preserved).
+
+## Custom script arguments
+
+Any flags not recognized by `aerpawlib` are passed through to `runner.initialize_args()`. This allows scripts to accept their own arguments:
+
+```python
+from argparse import ArgumentParser
+
+class MyMission(StateMachine):
+    def initialize_args(self, extra_args):
+        parser = ArgumentParser()
+        parser.add_argument("--output", default="data.csv")
+        parser.add_argument("--samplerate", type=float, default=1.0)
+        args = parser.parse_args(extra_args)
+        self._output = args.output
+        self._samplerate = args.samplerate
+```
+
+```bash
+aerpawlib --script my_mission.py --conn udp:127.0.0.1:14550 --vehicle drone \
+  --output flight_log.csv --samplerate 5.0
+```
+
+## Troubleshooting
+
+**Connection timeout**
+- Ensure SITL or the vehicle is running and the port matches.
+- Increase `--conn-timeout`.
+- For SITL, wait 10–15 seconds after `sim_vehicle.py` reports "Ready to FLY" before connecting.
+
+**No Runner found**
+- The script must define exactly one class that directly subclasses `BasicRunner`, `StateMachine`, or `ZmqStateMachine`.
+- For `BasicRunner`: exactly one method must have `@entrypoint`.
+- For `StateMachine`: exactly one state must have `first=True`.
+
+**`--no-aerpaw-environment` required**
+- When running outside the AERPAW platform, pass `--no-aerpaw-environment` to skip the platform connection and allow the vehicle to auto-arm.

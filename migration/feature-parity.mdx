@@ -1,0 +1,178 @@
+---
+title: "Feature parity: v1 vs v2"
+description: "Comprehensive matrix of aerpawlib features across the v1 and v2 APIs, including what is new in v2 and what remains unchanged."
+---
+
+Use this page to understand what is available in each API version before choosing which one to use or deciding how much of your script to migrate.
+
+<Info>
+The v1 API is stable and receives no breaking changes. The v2 API is under active development. Both APIs ship in the same `aerpawlib` package and can coexist in the same project.
+</Info>
+
+## Vehicle types
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `Drone` | Yes | Yes |
+| `Rover` | Yes | Yes |
+| `DummyVehicle` | Yes | Yes |
+| Blocking vehicle connection | Yes | No — connection is async (`await Drone.connect(...)`) |
+| Async vehicle connection | No | Yes |
+
+## Runner types
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `Runner` (base class) | Yes | Yes |
+| `BasicRunner` | Yes | Yes |
+| `StateMachine` | Yes | Yes |
+| `ZmqStateMachine` | Yes | Yes |
+| Config dataclass (`BasicRunnerConfig`) | No | Yes |
+| Config dataclass (`StateMachineConfig`) | No | Yes |
+| Config dataclass (`ZmqStateMachineConfig`) | No | Yes |
+
+## Decorators
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `@entrypoint` | Yes | Yes |
+| `@state` | Yes | Yes |
+| `@timed_state` | Yes | Yes |
+| `@background` | Yes | Yes |
+| `@at_init` | Yes | Yes |
+| `@expose_zmq` | Yes | Yes |
+| `@expose_field_zmq` | Yes | Yes |
+
+<Note>
+All decorators available in v1 are also available in v2 with identical semantics. v2 implements them as descriptors (`__set_name__`) rather than inspecting function attributes at runtime, but the user-facing API is unchanged.
+</Note>
+
+## Safety
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `SafetyCheckerClient` | Yes | Yes |
+| Safety server utilities | Yes | Yes |
+| `vehicle.safety` integration | No | Yes |
+| `can_takeoff(altitude)` on vehicle | No | Yes |
+| `can_goto(coordinate)` on vehicle | No | Yes |
+| `can_land()` on vehicle | No | Yes |
+| `--safety-checker-port` CLI flag | No | Yes |
+| `NoOpSafetyChecker` (passthrough) | No | Yes |
+
+## Types and geometry
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `Coordinate` | Yes | Yes |
+| `VectorNED` | Yes | Yes |
+| `VectorNED.cross_product` | Yes | Yes |
+| `Attitude` | No | Yes |
+| `Battery` | No | Yes |
+| `GPSInfo` | No | Yes |
+
+## Plan files
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `read_from_plan` | Yes | Yes |
+| `read_from_plan_complete` | Yes | Yes |
+| `get_location_from_waypoint` | Yes | Yes |
+| `Waypoint` type | No | Yes |
+
+## Geofencing
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `read_geofence` | Yes | Yes |
+| `inside` | Yes | Yes |
+| `do_intersect` | Yes | Yes |
+
+## ZMQ utilities
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `run_zmq_proxy` | Yes | Yes |
+| `check_zmq_proxy_reachable` | Yes | Yes |
+| Sequential message handling (no race condition) | No | Yes |
+| `asyncio.Event`-based field reply (no busy-poll) | No | Yes |
+| Malformed-message `.get()` guard | No | Yes |
+
+## Testing utilities
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `DummyVehicle` (no-op vehicle) | Yes | Yes |
+| `MockVehicle` (unit-test vehicle with state) | No | Yes |
+
+## Exceptions
+
+| Exception | v1 | v2 |
+|-----------|----|---------|
+| `AerpawlibError` (base) | Yes | Yes |
+| `AerpawConnectionError` | Yes | Yes |
+| `ConnectionTimeoutError` | Yes | Yes |
+| `HeartbeatLostError` | Yes | Yes |
+| `PortInUseError` | Yes | Yes |
+| `CommandError` | Yes | Yes |
+| `ArmError` | Yes | Yes |
+| `DisarmError` | Yes | Yes |
+| `TakeoffError` | Yes | Yes |
+| `LandingError` | Yes | Yes |
+| `NavigationError` | Yes | Yes |
+| `VelocityError` | Yes | Yes |
+| `RTLError` | Yes | Yes |
+| `StateError` | Yes | Yes |
+| `NotArmableError` | Yes | Yes |
+| `NotConnectedError` | Yes | Yes |
+| `NoEntrypointError` | Yes | Yes |
+| `InvalidStateError` | Yes | Yes |
+| `NoInitialStateError` | Yes | Yes |
+| `MultipleInitialStatesError` | Yes | Yes |
+| `InvalidStateNameError` | Yes | Yes |
+| `RunnerError` | No | Yes |
+| `UnexpectedDisarmError` | No | Yes |
+| `PlanError` | No | Yes |
+| `InvalidStateError` | No | Yes |
+| Typed `code` field on exceptions | No | Yes |
+| `severity` field (`warning`/`error`/`critical`) | No | Yes |
+| `HeadingError` | Yes | No |
+| `AbortedError` | Yes | No |
+| `MAVSDKNotInstalledError` | Yes | No |
+| `NotInAERPAWEnvironmentError` | Yes | No |
+| `StateMachineError` (base class) | Yes | No |
+| `InvalidAltitudeError` | Yes | No |
+| `InvalidSpeedError` | Yes | No |
+| `InvalidToleranceError` | Yes | No |
+| `NotImplementedForVehicleError` | Yes | No |
+| `ValidationError` | Yes | No |
+
+## CLI flags
+
+| Flag | v1 | v2 |
+|------|----|-------|
+| `--connection` | Yes | Yes |
+| `--script` | Yes | Yes |
+| `--api-version v2` | No | Yes |
+| `--safety-checker-port` | No | Yes |
+
+## Non-blocking vehicle commands
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `VehicleTask` (non-blocking goto) | No | Yes |
+| Progress query during goto | No | Yes |
+| Task cancellation | No | Yes |
+
+## AERPAW platform integration
+
+| Feature | v1 | v2 |
+|---------|----|---------|
+| `AERPAW_Platform` helper | Yes | Yes |
+| `ExternalProcess` | Yes | Yes |
+
+---
+
+<Warning>
+Several v1 exception types — `HeadingError`, `AbortedError`, `MAVSDKNotInstalledError`, `NotInAERPAWEnvironmentError`, `ValidationError`, `InvalidAltitudeError`, `InvalidSpeedError`, `InvalidToleranceError`, `NotImplementedForVehicleError`, `StateMachineError` — are not present in the v2 public API. If your code catches these specific types, add a fallback to `AerpawlibError` when targeting v2.
+</Warning>

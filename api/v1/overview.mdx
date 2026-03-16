@@ -1,0 +1,161 @@
+---
+title: "v1 API Overview"
+description: "Overview of the aerpawlib v1 API — a MAVSDK-backed, backward-compatible interface for autonomous drone and rover control on AERPAW."
+---
+
+The v1 API is a **MAVSDK-based** reimplementation of the original aerpawlib interface. It is API-compatible with legacy scripts, allowing existing missions to run against modern autopilot firmware with no code changes.
+
+<Note>
+v1 uses the same surface API as the legacy version. It has no additional features and is intended as a stopgap until aerpawlib v2 is ready.
+</Note>
+
+## Requirements
+
+- Python 3.9+
+- `mavsdk` — `pip install mavsdk`
+- `pyzmq` — `pip install pyzmq` (required for safety checker and ZMQ features)
+
+## Import pattern
+
+All public symbols are re-exported from the top-level `aerpawlib.v1` package:
+
+```python
+from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+```
+
+You can import everything you need from this single namespace — there is no need to import from sub-modules directly.
+
+## Quick start
+
+```python
+from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+
+class MyMission(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        await drone.takeoff(10)          # take off to 10 m AGL
+        target = Coordinate(35.7275, -78.6960, 10)
+        await drone.goto_coordinates(target)
+        await drone.land()
+```
+
+## Connection strings
+
+The v1 API uses MAVSDK-style MAVLink connection strings:
+
+```python
+Drone("udp://:14540")                     # SITL (default)
+Drone("udpin://0.0.0.0:14550")            # listen on all interfaces
+Drone("serial:///dev/ttyUSB0:57600")      # serial connection
+Drone("tcp://192.168.1.100:5760")         # TCP to autopilot
+```
+
+## Public exports
+
+The following names are exported by `aerpawlib.v1`:
+
+### Vehicles
+| Symbol | Description |
+|---|---|
+| `Vehicle` | Base class for all vehicle types |
+| `Drone` | Multirotor flight controller |
+| `Rover` | Ground vehicle controller |
+| `DummyVehicle` | No-op placeholder for scripts that do not need a vehicle |
+
+### Runners & decorators
+| Symbol | Description |
+|---|---|
+| `Runner` | Abstract base runner |
+| `BasicRunner` | Single-entrypoint runner |
+| `StateMachine` | State-based execution runner |
+| `ZmqStateMachine` | StateMachine with ZMQ remote-control |
+| `entrypoint` | Decorator — marks entry point for `BasicRunner` |
+| `state` | Decorator — defines a state in `StateMachine` |
+| `timed_state` | Decorator — defines a timed state |
+| `background` | Decorator — runs a coroutine in parallel to the state machine |
+| `at_init` | Decorator — runs before vehicle is armed |
+| `expose_zmq` | Decorator — exposes a state for ZMQ remote transitions |
+| `expose_field_zmq` | Decorator — exposes a field for ZMQ queries |
+| `in_background` | Alias for `asyncio.ensure_future` |
+| `sleep` | Alias for `asyncio.sleep` |
+
+### Types & utilities
+| Symbol | Description |
+|---|---|
+| `Coordinate` | WGS84 geographic position |
+| `VectorNED` | 3-D North-East-Down displacement / velocity vector |
+| `read_from_plan` | Parse a QGroundControl `.plan` file |
+| `read_from_plan_complete` | Parse a `.plan` file with extra fields |
+| `get_location_from_waypoint` | Extract `Coordinate` from a waypoint tuple |
+| `read_geofence` | Parse a KML polygon file |
+| `inside` | Ray-casting point-in-polygon test |
+
+### Safety checker
+| Symbol | Description |
+|---|---|
+| `SafetyCheckerServer` | ZMQ-based safety validation server (blocking) |
+| `SafetyCheckerClient` | Client for communicating with the server |
+
+### ZMQ utilities
+| Symbol | Description |
+|---|---|
+| `run_zmq_proxy` | Start an XSUB/XPUB forwarder |
+| `check_zmq_proxy_reachable` | Test connectivity to a running proxy |
+
+### Exceptions
+| Symbol | Description |
+|---|---|
+| `AerpawlibError` | Base exception for all aerpawlib errors |
+| `AerpawConnectionError` | Connection failed |
+| `ConnectionTimeoutError` | Connection timed out |
+| `HeartbeatLostError` | Vehicle heartbeat lost |
+| `PortInUseError` | MAVSDK server port conflict |
+| `TakeoffError` | Takeoff command failed |
+| `LandingError` | Landing command failed |
+| `NavigationError` | `goto_coordinates` failed |
+| `VelocityError` | `set_velocity` failed |
+| `RTLError` | Return-to-launch failed |
+| `ArmError` | Arming failed |
+| `DisarmError` | Disarming failed |
+| `NotArmableError` | Vehicle not ready to arm |
+| `StateMachineError` | State machine configuration error |
+| `NoEntrypointError` | `BasicRunner` missing `@entrypoint` |
+| `InvalidStateError` | Transition to unknown state |
+| `NoInitialStateError` | No `first=True` state defined |
+| `MultipleInitialStatesError` | More than one `first=True` state |
+
+## Migration from legacy
+
+Update your import path and everything else stays the same:
+
+```python
+# Legacy (deprecated — still works but will eventually be removed)
+from aerpawlib import Drone, Coordinate, BasicRunner, entrypoint
+
+# v1 (recommended)
+from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+```
+
+<Warning>
+Compatibility wrappers such as `_GPSInfoCompat` do **not** inherit from their DroneKit counterparts. Type-assertion code (`isinstance(gps, dronekit.GPSInfo)`) will break. If you relied on that, you were probably doing something wrong anyway.
+</Warning>
+
+## Sub-pages
+
+<CardGroup cols={2}>
+  <Card title="Vehicles" href="/api/v1/vehicles">
+    `Vehicle`, `Drone`, `Rover`, `DummyVehicle` — properties and methods
+  </Card>
+  <Card title="Runners" href="/api/v1/runners">
+    `BasicRunner`, `StateMachine`, `ZmqStateMachine` and all decorators
+  </Card>
+  <Card title="Types" href="/api/v1/types">
+    `Coordinate`, `VectorNED`, battery / GPS / attitude objects
+  </Card>
+  <Card title="Safety Checker" href="/api/v1/safety">
+    `SafetyCheckerServer`, `SafetyCheckerClient`, YAML config, KML format
+  </Card>
+  <Card title="ZMQ Utilities" href="/api/v1/zmq">
+    `run_zmq_proxy`, `check_zmq_proxy_reachable`, multi-vehicle coordination
+  </Card>
+</CardGroup>

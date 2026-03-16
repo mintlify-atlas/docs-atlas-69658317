@@ -1,0 +1,392 @@
+---
+title: "Types"
+description: "Core data types used throughout the v1 API — Coordinate, VectorNED, and telemetry compatibility objects."
+---
+
+## Coordinate
+
+Represents an absolute position in WGS84 geographic space.
+
+```python
+from aerpawlib.v1 import Coordinate
+```
+
+### Constructor
+
+```python
+Coordinate(lat, lon, alt=0)
+```
+
+<ParamField path="lat" type="float" required>
+  Latitude in decimal degrees (e.g. `35.7275`).
+</ParamField>
+
+<ParamField path="lon" type="float" required>
+  Longitude in decimal degrees (e.g. `-78.6960`).
+</ParamField>
+
+<ParamField path="alt" type="float">
+  Altitude in **meters relative to the home / launch position** (AGL). Defaults to `0`.
+</ParamField>
+
+```python
+pos = Coordinate(35.7275, -78.6960)         # ground level
+wp  = Coordinate(35.7275, -78.6960, 15)    # 15 m AGL
+```
+
+### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `lat` | `float` | Latitude in degrees |
+| `lon` | `float` | Longitude in degrees |
+| `alt` | `float` | Altitude AGL in meters |
+
+### Methods
+
+#### `distance`
+
+```python
+meters = pos.distance(other)
+```
+
+Calculate the **3-D distance** to another coordinate using the Haversine formula for horizontal distance and straight-line for altitude difference.
+
+<ParamField path="other" type="Coordinate" required>
+  Target coordinate.
+</ParamField>
+
+<ResponseField name="return" type="float">
+  3-D distance in meters.
+</ResponseField>
+
+#### `ground_distance`
+
+```python
+meters = pos.ground_distance(other)
+```
+
+Calculate the **2-D (horizontal) distance** to another coordinate, ignoring altitude difference.
+
+<ParamField path="other" type="Coordinate" required>
+  Target coordinate.
+</ParamField>
+
+<ResponseField name="return" type="float">
+  Horizontal distance in meters.
+</ResponseField>
+
+#### `bearing`
+
+```python
+deg = pos.bearing(other, wrap_360=True)
+```
+
+Calculate the compass bearing from this coordinate to another.
+
+<ParamField path="other" type="Coordinate" required>
+  Target coordinate.
+</ParamField>
+
+<ParamField path="wrap_360" type="bool">
+  If `True` (default), wraps the result to `[0, 360)`. Set to `False` to get a raw `atan2` result.
+</ParamField>
+
+<ResponseField name="return" type="float">
+  Bearing in degrees (0 = North, 90 = East, 180 = South, 270 = West). Returns `0.0` for coincident points.
+</ResponseField>
+
+#### `to_json` / `toJson`
+
+```python
+json_str = pos.to_json()
+```
+
+Serialize the coordinate to a JSON string `{"lat": ..., "lon": ..., "alt": ...}`. `toJson` is a backward-compatible alias.
+
+### Arithmetic
+
+| Operation | Result | Description |
+|---|---|---|
+| `coord + VectorNED` | `Coordinate` | Offset the position by a NED displacement vector |
+| `coord - VectorNED` | `Coordinate` | Subtract a NED displacement |
+| `coord - Coordinate` | `VectorNED` | Difference between two positions as a NED vector |
+
+```python
+from aerpawlib.v1 import Coordinate, VectorNED
+
+base = Coordinate(35.7275, -78.6960, 10)
+
+# move 100 m north and 50 m east
+offset = base + VectorNED(100, 50, 0)
+
+# get NED vector between two positions
+diff = base - Coordinate(35.7265, -78.6955, 10)  # -> VectorNED
+```
+
+---
+
+## VectorNED
+
+Represents a 3-D displacement or velocity vector in the **North-East-Down** frame. All units are in meters (for displacement) or m/s (for velocity).
+
+```python
+from aerpawlib.v1 import VectorNED
+```
+
+### Constructor
+
+```python
+VectorNED(north, east, down=0)
+```
+
+<ParamField path="north" type="float" required>
+  Component in the North direction (positive = northward).
+</ParamField>
+
+<ParamField path="east" type="float" required>
+  Component in the East direction (positive = eastward).
+</ParamField>
+
+<ParamField path="down" type="float">
+  Component in the Down direction (positive = downward, i.e. **descending**). Defaults to `0`.
+</ParamField>
+
+```python
+v = VectorNED(5, 0, 0)        # 5 m/s northward
+v = VectorNED(0, 3, -1)       # 3 m/s east, 1 m/s upward
+v = VectorNED(north=0, east=0, down=2)  # 2 m/s descent
+```
+
+### Attributes
+
+| Attribute | Type | Description |
+|---|---|---|
+| `north` | `float` | North component |
+| `east` | `float` | East component |
+| `down` | `float` | Down component (positive = descending) |
+
+### Methods
+
+#### `hypot`
+
+```python
+magnitude = vec.hypot(ignore_down=False)
+```
+
+Calculate the magnitude (Euclidean length) of the vector.
+
+<ParamField path="ignore_down" type="bool">
+  If `True`, calculate only the 2-D ground magnitude (North and East components only). Defaults to `False`.
+</ParamField>
+
+<ResponseField name="return" type="float">
+  Magnitude in meters (or m/s for velocity vectors).
+</ResponseField>
+
+```python
+v = VectorNED(3, 4, 0)
+v.hypot()              # 5.0
+v.hypot(ignore_down=True)  # 5.0  (same when down=0)
+
+v2 = VectorNED(3, 4, 5)
+v2.hypot()             # ~7.07
+v2.hypot(ignore_down=True)  # 5.0
+```
+
+#### `norm`
+
+```python
+unit = vec.norm()
+```
+
+Return a unit vector (magnitude = 1) in the same direction. Returns `VectorNED(0, 0, 0)` for the zero vector.
+
+<ResponseField name="return" type="VectorNED">
+  Normalized vector.
+</ResponseField>
+
+#### `rotate_by_angle`
+
+```python
+rotated = vec.rotate_by_angle(angle)
+```
+
+Rotate the vector in the horizontal plane (North-East) by `angle` degrees. The `down` component is preserved unchanged.
+
+<ParamField path="angle" type="float" required>
+  Rotation angle in degrees, counterclockwise when viewed from above.
+</ParamField>
+
+<ResponseField name="return" type="VectorNED">
+  A new, rotated `VectorNED`.
+</ResponseField>
+
+```python
+v = VectorNED(1, 0, 0)          # pointing north
+v.rotate_by_angle(90)           # -> VectorNED(~0, 1, 0) — pointing east
+```
+
+#### `cross_product`
+
+```python
+result = vec.cross_product(other)
+```
+
+Compute the cross product `self × other`.
+
+<ParamField path="other" type="VectorNED" required>
+  The other vector.
+</ParamField>
+
+<ResponseField name="return" type="VectorNED">
+  The cross product vector.
+</ResponseField>
+
+### Arithmetic
+
+| Operation | Result | Description |
+|---|---|---|
+| `v1 + v2` | `VectorNED` | Component-wise addition |
+| `v1 - v2` | `VectorNED` | Component-wise subtraction |
+| `v * scalar` | `VectorNED` | Scalar multiplication |
+| `scalar * v` | `VectorNED` | Scalar multiplication (commutative) |
+
+```python
+v1 = VectorNED(1, 0, 0)
+v2 = VectorNED(0, 1, 0)
+
+v3 = v1 + v2          # VectorNED(1, 1, 0)
+v4 = v1 * 5           # VectorNED(5, 0, 0)
+v5 = 2 * v2           # VectorNED(0, 2, 0)
+```
+
+---
+
+## Telemetry types
+
+These objects are returned by `Vehicle` properties. They mirror the DroneKit field names but do **not** inherit from DroneKit classes.
+
+### `_BatteryCompat`
+
+Returned by `vehicle.battery`.
+
+| Field | Type | Description |
+|---|---|---|
+| `voltage` | `float` | Battery voltage in volts |
+| `current` | `float` | Current draw in amps |
+| `level` | `int` | Remaining charge percentage (0–100) |
+
+```python
+bat = drone.battery
+print(f"{bat.level}% @ {bat.voltage:.1f}V ({bat.current:.2f}A)")
+```
+
+### `_GPSInfoCompat`
+
+Returned by `vehicle.gps`.
+
+| Field | Type | Description |
+|---|---|---|
+| `fix_type` | `int` | 0–1: no fix, 2: 2-D fix, 3: 3-D fix |
+| `satellites_visible` | `int` | Number of visible satellites |
+
+```python
+gps = drone.gps
+if gps.fix_type < 3:
+    print("Waiting for 3D GPS fix...")
+```
+
+### `_AttitudeCompat`
+
+Returned by `vehicle.attitude`. All angles in **radians**.
+
+| Field | Type | Description |
+|---|---|---|
+| `pitch` | `float` | Pitch angle (horizon-relative) |
+| `roll` | `float` | Roll angle (horizon-relative) |
+| `yaw` | `float` | Yaw angle (world-relative, North = 0) |
+
+```python
+import math
+att = drone.attitude
+print(f"Pitch: {math.degrees(att.pitch):.1f}°  Roll: {math.degrees(att.roll):.1f}°")
+```
+
+### `_VersionCompat`
+
+Returned by `vehicle.autopilot_info`.
+
+| Field | Type | Description |
+|---|---|---|
+| `major` | `int \| None` | Major firmware version |
+| `minor` | `int \| None` | Minor firmware version |
+| `patch` | `int \| None` | Patch firmware version |
+
+---
+
+## Waypoint utilities
+
+These functions parse QGroundControl `.plan` files.
+
+### `read_from_plan`
+
+```python
+waypoints = read_from_plan(path, default_speed=5)
+```
+
+Parse a `.plan` file into a list of waypoint tuples `(command, lat, lon, alt, waypoint_id, speed)`.
+
+<ParamField path="path" type="str" required>
+  Path to the `.plan` file.
+</ParamField>
+
+<ParamField path="default_speed" type="float">
+  Speed in m/s to use when the plan does not specify one. Defaults to `5`.
+</ParamField>
+
+### `read_from_plan_complete`
+
+```python
+waypoints = read_from_plan_complete(path, default_speed=5)
+```
+
+Same as `read_from_plan` but returns a list of dictionaries with additional fields:
+
+```python
+{
+    "id":       int,       # waypoint sequence number
+    "command":  int,       # MAVLink command code
+    "pos":      [lat, lon, alt],
+    "wait_for": float,     # delay in seconds before continuing
+    "speed":    float,     # speed in m/s
+}
+```
+
+### `get_location_from_waypoint`
+
+```python
+coord = get_location_from_waypoint(waypoint)
+```
+
+Extract a `Coordinate` from a waypoint tuple returned by `read_from_plan`.
+
+---
+
+## Geofence utilities
+
+### `read_geofence`
+
+```python
+polygon = read_geofence(filePath)
+```
+
+Parse a KML file into a list of `{"lat": float, "lon": float}` dictionaries representing a polygon boundary.
+
+### `inside`
+
+```python
+result = inside(lon, lat, geofence)
+```
+
+Ray-casting point-in-polygon test. Returns `True` if the point is inside the polygon.

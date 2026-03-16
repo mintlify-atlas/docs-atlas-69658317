@@ -1,0 +1,210 @@
+---
+title: "Safety"
+description: "SafetyCheckerClient, NoOpSafetyChecker, PreflightChecks, and how to wire safety into vehicle connection."
+---
+
+v2 provides two layers of safety:
+
+1. **Command validation** — `can_takeoff`, `can_goto`, `can_land` check local state (GPS fix, battery, tolerance bounds) before dispatching a command.
+2. **External geofence validation** — an optional `SafetyCheckerClient` forwards validation requests to a remote `SafetyCheckerServer` over ZMQ.
+
+## Passing safety to `Drone.connect()`
+
+```python
+from aerpawlib.v2 import Drone
+from aerpawlib.v2.safety import SafetyCheckerClient
+
+client = SafetyCheckerClient(addr="127.0.0.1", port=14580)
+drone = await Drone.connect("udpin://127.0.0.1:14550", safety=client)
+
+ok, msg = await drone.can_takeoff(10)
+if not ok:
+    raise RuntimeError(f"Cannot take off: {msg}")
+await drone.takeoff(altitude=10)
+```
+
+The `safety` attribute can also be set directly on an already-connected vehicle:
+
+```python
+drone.safety = client
+```
+
+When `safety` is `None`, `can_takeoff` and `can_goto` run only local checks; `can_land` returns `(True, "")`.
+
+---
+
+## Automatic setup via CLI (`--safety-checker-port`)
+
+When running via the aerpawlib CLI the safety client is built automatically and passed to `connect(safety=…)`.
+
+| Environment | `--safety-checker-port` | Behaviour |
+|-------------|-------------------------|-----------|
+| Non-AERPAW | Not provided | `vehicle.safety` uses `NoOpSafetyChecker`; all validations pass, errors logged. |
+| Non-AERPAW | Provided (e.g. `14580`) | Attempts to connect to `127.0.0.1:<port>`. On failure: falls back to `NoOpSafetyChecker` and logs. |
+| AERPAW | Not provided | Defaults to port `14580`. Attempts to connect. **Crash with critical error on failure.** |
+| AERPAW | Provided | Attempts to connect to given port. **Crash with critical error on failure.** |
+
+```bash
+# Non-AERPAW: optional
+aerpawlib --api-version v2 --script mission.py --vehicle drone --conn udpin://127.0.0.1:14550 \
+    --safety-checker-port 14580
+
+# AERPAW: defaults to 14580; must succeed
+aerpawlib --api-version v2 --script mission.py --vehicle drone --conn udpin://0.0.0.0:14550
+```
+
+---
+
+## `SafetyCheckerClient`
+
+Async ZMQ `REQ` socket client that forwards validation requests to a `SafetyCheckerServer`.
+
+```python
+from aerpawlib.v2.safety import SafetyCheckerClient
+```
+
+### Constructor
+
+```python
+SafetyCheckerClient(
+    addr: str,
+    port: int,
+    timeout_s: float = 10.0,
+)
+```
+
+<ParamField path="addr" type="str" required>
+  Hostname or IP address of the `SafetyCheckerServer`.
+</ParamField>
+
+<ParamField path="port" type="int" required>
+  TCP port the server is listening on (default AERPAW port is `14580`).
+</ParamField>
+
+<ParamField path="timeout_s" type="float">
+  Per-request send/receive timeout in seconds. Default `10.0`. On timeout the socket is reconnected automatically.
+</ParamField>
+
+### Methods
+
+```python
+async def validate_waypoint(
+    self, current: Coordinate, next_loc: Coordinate
+) -> Tuple[bool, str]
+```
+
+Ask the server whether navigating from `current` to `next_loc` is permitted.
+
+```python
+async def validate_takeoff(
+    self,
+    takeoff_alt: float,
+    current_lat: float,
+    current_lon: float,
+) -> Tuple[bool, str]
+```
+
+Ask the server whether taking off to `takeoff_alt` metres from the current position is permitted.
+
+```python
+async def validate_landing(
+    self, current_lat: float, current_lon: float
+) -> Tuple[bool, str]
+```
+
+Ask the server whether landing at the current position is permitted.
+
+```python
+async def validate_change_speed(
+    self, new_speed: float
+) -> Tuple[bool, str]
+```
+
+Ask the server whether changing speed to `new_speed` m/s is permitted.
+
+```python
+async def check_server_status(self) -> Tuple[bool, str]
+```
+
+Query the server health endpoint.
+
+```python
+def close(self) -> None
+```
+
+Close the ZMQ socket and terminate the context.
+
+---
+
+## `NoOpSafetyChecker`
+
+Passthrough checker used when no `SafetyCheckerServer` is available. All validation methods return `(True, "")` but log a warning.
+
+```python
+from aerpawlib.v2.safety import NoOpSafetyChecker
+
+noop = NoOpSafetyChecker(reason="development environment — no geofence server")
+drone = await Drone.connect(conn_str, safety=noop)
+```
+
+<Warning>
+Do **not** use `NoOpSafetyChecker` in production AERPAW experiments. The CLI will build the appropriate checker automatically; only use it explicitly in local development.
+</Warning>
+
+---
+
+## `PreflightChecks`
+
+Static preflight checks that can be run independently of the vehicle command flow.
+
+```python
+from aerpawlib.v2.safety import PreflightChecks
+```
+
+```python
+@staticmethod
+async def run_all(vehicle: VehicleProtocol) -> bool
+```
+
+Run all checks (GPS fix, battery) and return `True` only if all pass.
+
+```python
+@staticmethod
+def check_gps_fix(vehicle: VehicleProtocol) -> bool
+```
+
+Returns `True` if `vehicle.gps.fix_type >= 3`.
+
+```python
+@staticmethod
+def check_battery(vehicle: VehicleProtocol, min_percent: float = 10.0) -> bool
+```
+
+Returns `True` if `vehicle.battery.level >= min_percent`.
+
+```python
+# Usage
+ok = await PreflightChecks.run_all(drone)
+if not ok:
+    print("Preflight failed")
+```
+
+---
+
+## `ConnectionHandler`
+
+`ConnectionHandler` is the single authority for heartbeat monitoring. It is wired automatically by the CLI; direct use is uncommon in user scripts.
+
+```python
+from aerpawlib.v2.safety import ConnectionHandler
+
+handler = ConnectionHandler(
+    vehicle=drone,
+    heartbeat_timeout=5.0,  # seconds
+    start_delay=1.0,        # grace period before first check
+    on_disconnect=None,     # optional callback on heartbeat loss
+)
+handler.start()
+```
+
+Use `handler.get_disconnect_future()` to race against heartbeat loss in custom event loops.

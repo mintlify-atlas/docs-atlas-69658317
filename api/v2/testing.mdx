@@ -1,0 +1,168 @@
+---
+title: "Testing"
+description: "MockVehicle for unit tests and DummyVehicle for dry-run pipeline testing."
+---
+
+aerpawlib v2 ships two test helpers that let you write deterministic tests without MAVSDK or real hardware.
+
+---
+
+## `MockVehicle`
+
+Minimal in-memory vehicle for **unit tests**. Satisfies `VehicleProtocol` but makes no async calls.
+
+```python
+from aerpawlib.v2 import MockVehicle, Coordinate
+```
+
+### Constructor
+
+```python
+MockVehicle(
+    position: Optional[Coordinate] = None,
+    home: Optional[Coordinate] = None,
+    armed: bool = False,
+    connected: bool = True,
+)
+```
+
+<ParamField path="position" type="Coordinate | None">
+  Initial position. Defaults to NCSU campus coordinates `(35.727436, -78.696587, 0)`.
+</ParamField>
+
+<ParamField path="home" type="Coordinate | None">
+  Home coordinate. Defaults to the initial `position`.
+</ParamField>
+
+<ParamField path="armed" type="bool">
+  Whether the vehicle starts armed. Default `False`.
+</ParamField>
+
+<ParamField path="connected" type="bool">
+  Whether the vehicle starts connected. Default `True`.
+</ParamField>
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `position` | `Coordinate` | Current position |
+| `home_coords` | `Optional[Coordinate]` | Home coordinate |
+| `armed` | `bool` | Armed state |
+| `connected` | `bool` | Connection state |
+| `battery` | `Battery` | Static `Battery(12.6, 0.0, 100)` |
+| `gps` | `GPSInfo` | Static `GPSInfo(fix_type=3, satellites_visible=10)` |
+| `heading` | `float` | Static `0.0` degrees |
+
+`MockVehicle` also exposes `heartbeat_tick()` (no-op) to satisfy `VehicleProtocol`.
+
+### pytest example
+
+```python
+import pytest
+from aerpawlib.v2 import MockVehicle, Coordinate, VectorNED
+
+@pytest.fixture
+def vehicle():
+    return MockVehicle(
+        position=Coordinate(35.727, -78.696, 0),
+        connected=True,
+    )
+
+def test_position_arithmetic(vehicle):
+    new_pos = vehicle.position + VectorNED(north=100, east=0)
+    assert abs(new_pos.lat - vehicle.position.lat) > 0
+    assert abs(new_pos.ground_distance(vehicle.position) - 100) < 1
+
+def test_battery_defaults(vehicle):
+    assert vehicle.battery.level == 100
+    assert vehicle.gps.fix_type == 3
+```
+
+### Testing runner logic
+
+Pass a `MockVehicle` directly to runner methods to exercise mission logic without hardware:
+
+```python
+import asyncio
+from aerpawlib.v2 import MockVehicle, BasicRunner, entrypoint
+
+class CountingRunner(BasicRunner):
+    visited: list = []
+
+    @entrypoint
+    async def run(self, vehicle):
+        self.visited.append(vehicle.position)
+
+def test_runner_records_position():
+    vehicle = MockVehicle(position=Coordinate(1.0, 2.0, 0))
+    runner = CountingRunner()
+    asyncio.run(runner.run(vehicle))
+    assert len(runner.visited) == 1
+    assert runner.visited[0].lat == pytest.approx(1.0)
+```
+
+---
+
+## `DummyVehicle`
+
+No-op vehicle that implements the **complete** `Vehicle` interface (all commands succeed silently). Use it for **dry-run** testing of full runner pipelines — the runner executes exactly as it would with a real vehicle, but no MAVSDK calls are made.
+
+```python
+from aerpawlib.v2 import DummyVehicle
+```
+
+### Constructor / `connect()`
+
+```python
+vehicle = await DummyVehicle.connect(
+    connection_string: str = "",
+    mavsdk_server_port: int = 50051,
+    *,
+    timeout: float = 30.0,
+    safety: Optional[...] = None,
+)
+```
+
+All parameters are accepted and ignored. Returns immediately without opening any network connection.
+
+**Pre-set state** (suitable for most mission tests):
+
+| Property | Value |
+|----------|-------|
+| `position` | `Coordinate(35.727436, -78.696587, 0)` |
+| `home_coords` | Same as position |
+| `battery.level` | `100` |
+| `gps.fix_type` | `3` |
+| `armable` | `True` |
+| `armed` | `False` |
+
+### When to use each helper
+
+| | `MockVehicle` | `DummyVehicle` |
+|-|---------------|----------------|
+| Satisfies `VehicleProtocol` | Yes | Yes |
+| Supports command methods (`takeoff`, `goto_coordinates`, …) | No — raises `AttributeError` | Yes — all no-ops |
+| Best for | Testing logic that reads telemetry | Dry-running complete runner pipelines |
+| Needs `await connect()` | No | Yes |
+
+```python
+import asyncio
+from aerpawlib.v2 import DummyVehicle, BasicRunner, entrypoint, Coordinate, VectorNED
+
+class MyMission(BasicRunner):
+    @entrypoint
+    async def run(self, drone):
+        await drone.takeoff(altitude=10)           # no-op
+        await drone.goto_coordinates(
+            drone.position + VectorNED(50, 0))     # no-op
+        await drone.land()                         # no-op
+        print("Dry run complete")
+
+async def main():
+    vehicle = await DummyVehicle.connect()
+    runner = MyMission()
+    await runner.run(vehicle)
+
+asyncio.run(main())
+```

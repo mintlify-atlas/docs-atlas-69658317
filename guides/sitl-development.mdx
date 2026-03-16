@@ -1,0 +1,224 @@
+---
+title: "SITL Development"
+description: "Develop and test aerpawlib missions locally using ArduPilot Software-in-the-Loop simulation before flying real hardware."
+---
+
+Software-in-the-Loop (SITL) runs the ArduPilot flight controller as a simulation on your computer. aerpawlib connects to SITL exactly the same way it connects to real hardware, letting you iterate quickly on mission logic without a physical vehicle.
+
+## Prerequisites
+
+- Python 3.9+
+- aerpawlib installed in development mode: `pip install -e .[dev]`
+- Git, a C++ compiler, and ArduPilot build dependencies
+
+## Installing SITL
+
+Run the one-time setup command to clone ArduPilot and compile SITL binaries:
+
+```bash
+aerpawlib-setup-sitl
+```
+
+This command:
+1. Clones the ArduPilot repository (branch `Copter-4.6.3` by default) into `./ardupilot/`.
+2. Initializes all git submodules.
+3. Compiles the SITL binaries for ArduCopter and ArduRover using `waf`.
+
+<Note>
+First-time compilation takes 5–15 minutes depending on your machine. Subsequent invocations are fast because only changed files are recompiled.
+</Note>
+
+You can also install via the dev setup script:
+
+```bash
+./scripts/install_dev.sh
+```
+
+## Starting SITL
+
+SITL is managed by `sim_vehicle.py`, which is part of ArduPilot's autotest tooling.
+
+<CodeGroup>
+
+```bash ArduCopter (drone)
+sim_vehicle.py -v ArduCopter -I 0 --out=udp:127.0.0.1:14550 -w
+```
+
+```bash ArduRover
+sim_vehicle.py -v Rover -I 1 --out=udp:127.0.0.1:14560 -w
+```
+
+```bash Both simultaneously (different instances)
+# Terminal 1
+sim_vehicle.py -v ArduCopter -I 0 --out=udp:127.0.0.1:14550 -w
+
+# Terminal 2
+sim_vehicle.py -v Rover -I 1 --out=udp:127.0.0.1:14560 -w
+```
+
+</CodeGroup>
+
+| Flag | Description |
+|------|-------------|
+| `-v ArduCopter` | Simulate a copter (drone) |
+| `-v Rover` | Simulate a rover |
+| `-I 0` / `-I 1` | Instance number. Different instances use different internal ports to avoid conflicts. |
+| `--out=udp:127.0.0.1:14550` | Send MAVLink telemetry to aerpawlib on this port |
+| `-w` | Wipe saved state on startup (clean EEPROM) |
+
+<Warning>
+Wait for SITL to print "Ready to FLY" and then wait an additional 10–15 seconds before connecting aerpawlib. SITL may briefly report the vehicle as ready before the home position and GPS data are stable, which can cause GUIDED mode failures.
+</Warning>
+
+## Running examples against SITL
+
+After SITL is running, run your script in a separate terminal.
+
+<Tabs>
+  <Tab title="v1">
+    ```bash
+    aerpawlib \
+      --script examples/v1/basic_example.py \
+      --conn udp:127.0.0.1:14550 \
+      --vehicle drone \
+      --no-aerpaw-environment
+    ```
+
+    ```bash
+    # Rover
+    aerpawlib \
+      --script examples/v1/squareoff_logging.py \
+      --conn udp:127.0.0.1:14560 \
+      --vehicle rover \
+      --no-aerpaw-environment
+    ```
+  </Tab>
+  <Tab title="v2">
+    ```bash
+    aerpawlib \
+      --api-version v2 \
+      --script my_mission.py \
+      --conn udpin://127.0.0.1:14550 \
+      --vehicle drone \
+      --no-aerpaw-environment
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+Always pass `--no-aerpaw-environment` during SITL development. Without it, aerpawlib will attempt to connect to the AERPAW platform and exit immediately when it cannot reach it.
+</Tip>
+
+## Running tests
+
+aerpawlib uses pytest. Tests are in two categories:
+
+| Category | Location | SITL required |
+|----------|----------|---------------|
+| Unit | `tests/unit/` | No |
+| Integration | `tests/integration/` | Yes (managed by pytest) |
+
+### Unit tests (fast, no SITL)
+
+```bash
+pytest tests/unit/ -v
+# or by marker
+pytest -m unit -v
+```
+
+### Integration tests (pytest manages SITL)
+
+For integration tests, pytest **starts and stops SITL automatically**. You do not need to start `sim_vehicle.py` separately.
+
+```bash
+pytest tests/integration/ -v
+# or by marker
+pytest -m integration -v
+```
+
+What pytest does:
+1. Starts ArduCopter SITL (instance 0, UDP port 14550) for drone tests.
+2. Starts ArduRover SITL (instance 1, UDP port 14560) for rover tests.
+3. Runs a full SITL reset (disarm, clear mission, battery reset) between each test.
+4. Stops SITL when the test session ends.
+
+### Using an external SITL instance
+
+If you prefer to manage SITL yourself (useful when iterating quickly on a specific test):
+
+```bash
+# Terminal 1
+sim_vehicle.py -v ArduCopter -I 0 --out=udp:127.0.0.1:14550 -w
+
+# Terminal 2
+sim_vehicle.py -v Rover -I 1 --out=udp:127.0.0.1:14560 -w
+
+# Terminal 3: run tests without starting/stopping SITL
+pytest tests/integration/ -v --no-sitl
+```
+
+### pytest options
+
+| Option | Description |
+|--------|-------------|
+| `--sitl-port PORT` | UDP port for drone SITL (default: `14550`) |
+| `--sitl-port-drone PORT` | UDP port for ArduCopter SITL (default: `14550`) |
+| `--sitl-port-rover PORT` | UDP port for ArduRover SITL (default: `14560`) |
+| `--no-sitl` | Do not start SITL; use an external instance |
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SITL_VERBOSE=1` | off | Show SITL stdout/stderr in the terminal |
+| `SIM_SPEEDUP=5` | `5` | Simulation speed multiplier |
+| `ARDUPILOT_HOME` | `./ardupilot` | Path to the ArduPilot clone |
+
+## SITL log files
+
+| File | Contents |
+|------|----------|
+| `logs/sitl_drone_output.log` | `sim_vehicle.py` output for the drone SITL |
+| `logs/sitl_rover_output.log` | `sim_vehicle.py` output for the rover SITL |
+| `/tmp/ArduCopter.log` | SITL binary output (headless mode) |
+| `/tmp/Rover.log` | SITL binary output (headless mode) |
+
+## MAVProxy console
+
+`sim_vehicle.py` opens a MAVProxy console by default. You can interact with the simulated vehicle directly from it:
+
+```
+mode guided          # switch to GUIDED mode
+arm throttle         # arm the vehicle
+wp load mission.txt  # load a waypoint file
+takeoff 10           # command a 10m takeoff
+```
+
+To suppress the MAVProxy window (headless mode, as used by pytest), unset the `DISPLAY` environment variable:
+
+```bash
+unset DISPLAY
+sim_vehicle.py -v ArduCopter -I 0 --out=udp:127.0.0.1:14550 -w
+```
+
+## SITL connection strings summary
+
+| Use case | Connection string |
+|----------|------------------|
+| v1 drone (SITL default) | `udp:127.0.0.1:14550` |
+| v1 rover (SITL instance 1) | `udp:127.0.0.1:14560` |
+| v2 drone | `udpin://127.0.0.1:14550` |
+| v2 rover | `udpin://127.0.0.1:14560` |
+| Serial port | `serial:///dev/ttyUSB0:57600` |
+| TCP (MAVProxy output) | `tcp://localhost:5760` |
+
+## Troubleshooting
+
+**"Mode change to GUIDED failed: requires position"**
+SITL reported ready before GPS position was stable. Wait 10–15 seconds after SITL reports "Ready to FLY", or use `--no-sitl` with an already-running external SITL that has had time to stabilize.
+
+**Connection timeout**
+Make sure `sim_vehicle.py` is running, the `--out` port matches `--conn`, and no firewall is blocking localhost UDP.
+
+**Multiple vehicles: port conflicts**
+Use distinct `-I` instance numbers for each vehicle and distinct `--mavsdk-port` values when running multiple aerpawlib processes on the same host.

@@ -1,0 +1,123 @@
+---
+title: "Plan Files"
+description: "Parse QGroundControl .plan files into waypoints and Coordinates."
+---
+
+aerpawlib v2 can parse QGroundControl `.plan` JSON files into typed waypoints.
+
+```python
+from aerpawlib.v2.plan import read_from_plan, get_location_from_waypoint
+# or from the top-level package:
+from aerpawlib.v2 import read_from_plan, get_location_from_waypoint, Waypoint
+```
+
+---
+
+## `Waypoint`
+
+A `Waypoint` is a plain Python `Tuple` (not a dataclass):
+
+```python
+Waypoint = Tuple[int, float, float, float, int, float]
+#                cmd   lat   lon   alt   id  speed
+```
+
+| Index | Field | Type | Description |
+|-------|-------|------|-------------|
+| `[0]` | command | `int` | MAVLink command code. `16` = navigate waypoint, `22` = takeoff, `20` = RTL |
+| `[1]` | lat | `float` | Latitude (WGS84 decimal degrees) |
+| `[2]` | lon | `float` | Longitude (WGS84 decimal degrees) |
+| `[3]` | alt | `float` | Altitude in metres |
+| `[4]` | waypoint_id | `int` | `doJumpId` from the plan file |
+| `[5]` | speed | `float` | Speed in m/s to use when flying to this waypoint |
+
+---
+
+## `read_from_plan()`
+
+```python
+def read_from_plan(
+    path: str,
+    default_speed: float = 5.0,
+) -> List[Waypoint]
+```
+
+Parse a `.plan` file and return waypoints for `TAKEOFF` (cmd `22`), `WAYPOINT` (cmd `16`), and `RTL` (cmd `20`) items. Speed-change items (`cmd 178`) update the speed applied to subsequent waypoints but do not appear in the output.
+
+<ParamField path="path" type="str" required>
+  File path to the `.plan` file.
+</ParamField>
+
+<ParamField path="default_speed" type="float">
+  Speed in m/s used if the plan contains no speed-change items. Default `5.0`.
+</ParamField>
+
+Raises `PlanError` if the file does not exist, is not valid JSON, or is not a QGroundControl Plan file.
+
+---
+
+## `read_from_plan_complete()`
+
+```python
+def read_from_plan_complete(
+    path: str,
+    default_speed: float = 5.0,
+) -> List[dict]
+```
+
+Same as `read_from_plan` but returns richer `dict` objects instead of bare tuples. Each dict has:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `id` | `int` | `doJumpId` from the plan file |
+| `command` | `int` | MAVLink command code |
+| `pos` | `[lat, lon, alt]` | Three-element list |
+| `wait_for` | `float` | Delay in seconds (`params[0]` from the plan item) |
+| `speed` | `float` | Speed in m/s |
+
+---
+
+## `get_location_from_waypoint()`
+
+```python
+def get_location_from_waypoint(waypoint: Waypoint) -> Coordinate
+```
+
+Extract a `Coordinate` from a `Waypoint` tuple.
+
+<ParamField path="waypoint" type="Waypoint" required>
+  A waypoint tuple as returned by `read_from_plan()`.
+</ParamField>
+
+Returns `Coordinate(lat=waypoint[1], lon=waypoint[2], alt=waypoint[3])`.
+
+---
+
+## Full example
+
+```python
+from aerpawlib.v2 import BasicRunner, Drone, entrypoint
+from aerpawlib.v2.plan import read_from_plan, get_location_from_waypoint
+
+class PlanMission(BasicRunner):
+    @entrypoint
+    async def run(self, drone: Drone):
+        waypoints = read_from_plan("mission.plan")
+
+        # Take off to the altitude of the first waypoint
+        if waypoints:
+            first = get_location_from_waypoint(waypoints[0])
+            await drone.takeoff(altitude=first.alt)
+
+        # Fly all waypoints
+        for wp in waypoints:
+            coord = get_location_from_waypoint(wp)
+            print(f"Flying to {coord.lat:.6f}, {coord.lon:.6f} @ {coord.alt}m")
+            await drone.goto_coordinates(coord)
+
+        await drone.land()
+```
+
+<Note>
+`read_from_plan` includes takeoff and RTL waypoints. If your plan ends with an RTL item the drone's autopilot will handle RTL once that waypoint is reached — calling `return_to_launch()` separately is typically unnecessary.
+</Note>

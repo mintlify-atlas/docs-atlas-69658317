@@ -1,0 +1,252 @@
+---
+title: "Migrating from v1 to v2"
+description: "Step-by-step guide for updating aerpawlib scripts from the v1 API to the v2 async-first API."
+---
+
+The v2 API is a ground-up rewrite of aerpawlib. Most scripts require only small, mechanical changes. This page walks through each area of change with before-and-after examples.
+
+<Note>
+Decorator-style runners (`@entrypoint`, `@state`, etc.) are fully backward-compatible. If your v1 script uses decorators, those sections of your code will work in v2 without modification.
+</Note>
+
+## Summary of changes
+
+| Area | v1 | v2 |
+|------|----|---------|
+| Import path | `aerpawlib.v1` | `aerpawlib.v2` |
+| Runner configuration | `inspect.getmembers` + function attributes | Config dataclass or decorators |
+| Safety integration | `SafetyCheckerClient` (manual) | `vehicle.safety` + `can_takeoff` / `can_goto` / `can_land` |
+| Type imports | `aerpawlib.v1.util` | `aerpawlib.v2.types` |
+| Plan file imports | `aerpawlib.v1.util` | `aerpawlib.v2.plan` |
+| Vehicle connection | Blocking | Async (`await Drone.connect(...)`) |
+| CLI version flag | _(none required)_ | `--api-version v2` |
+
+---
+
+## Migration walkthrough
+
+<Steps>
+  <Step title="Update imports">
+    Change every `aerpawlib.v1` import to `aerpawlib.v2`. The top-level re-exports are identical, so a simple find-and-replace is usually sufficient.
+
+    <Tabs>
+      <Tab title="v1">
+        ```python
+        from aerpawlib.v1 import Drone, Coordinate, BasicRunner, entrypoint
+        from aerpawlib.v1.util import Coordinate, VectorNED
+        from aerpawlib.v1.util import read_from_plan, read_from_plan_complete
+        ```
+      </Tab>
+      <Tab title="v2">
+        ```python
+        from aerpawlib.v2 import Drone, Coordinate, BasicRunner, entrypoint
+        from aerpawlib.v2.types import Coordinate, VectorNED
+        from aerpawlib.v2.plan import read_from_plan, read_from_plan_complete
+        ```
+      </Tab>
+    </Tabs>
+
+    Types and plan helpers are also re-exported from the top-level `aerpawlib.v2` package, so `from aerpawlib.v2 import Coordinate, VectorNED` works as well.
+  </Step>
+
+  <Step title="Update runner configuration">
+    v2 supports two styles. The decorator style is unchanged from v1. The config dataclass style is new and explicit.
+
+    <Tabs>
+      <Tab title="v1 (decorator)">
+        ```python
+        from aerpawlib.v1 import BasicRunner, entrypoint, Drone
+
+        class MyMission(BasicRunner):
+            @entrypoint
+            async def run(self, drone: Drone):
+                await drone.takeoff(altitude=10)
+                await drone.land()
+        ```
+      </Tab>
+      <Tab title="v2 (decorator — unchanged)">
+        ```python
+        from aerpawlib.v2 import BasicRunner, entrypoint, Drone
+
+        class MyMission(BasicRunner):
+            @entrypoint
+            async def run(self, drone: Drone):
+                await drone.takeoff(altitude=10)
+                await drone.land()
+        ```
+      </Tab>
+      <Tab title="v2 (config dataclass)">
+        ```python
+        from aerpawlib.v2 import BasicRunner, BasicRunnerConfig, Drone
+
+        class MyMission(BasicRunner):
+            config = BasicRunnerConfig(entrypoint="run")
+
+            async def run(self, drone: Drone):
+                await drone.takeoff(altitude=10)
+                await drone.land()
+        ```
+      </Tab>
+    </Tabs>
+
+    The same pattern applies to `StateMachine` and `ZmqStateMachine`: decorators still work, or you can supply `StateMachineConfig` / `ZmqStateMachineConfig` explicitly.
+  </Step>
+
+  <Step title="Update safety checks">
+    v1 required you to instantiate `SafetyCheckerClient` yourself and call it directly before commands. v2 attaches the safety client to the vehicle at connection time; you then call `can_takeoff`, `can_goto`, and `can_land` on the vehicle object.
+
+    <Tabs>
+      <Tab title="v1">
+        ```python
+        from aerpawlib.v1.safety import SafetyCheckerClient
+        from aerpawlib.v1 import Drone
+
+        client = SafetyCheckerClient("127.0.0.1", 14580)
+        ok, msg = client.validate_takeoff(10)
+        if not ok:
+            return
+        await drone.takeoff(altitude=10)
+        ```
+      </Tab>
+      <Tab title="v2">
+        ```python
+        from aerpawlib.v2.safety import SafetyCheckerClient
+        from aerpawlib.v2 import Drone
+
+        client = SafetyCheckerClient("127.0.0.1", 14580)
+        drone = await Drone.connect(conn, safety=client)
+
+        ok, msg = await drone.can_takeoff(10)
+        if not ok:
+            return
+        await drone.takeoff(altitude=10)
+        ```
+      </Tab>
+    </Tabs>
+
+    When running scripts through the aerpawlib CLI, pass `--safety-checker-port 14580` and the framework builds and attaches the `SafetyCheckerClient` automatically. Outside the AERPAW platform the flag is optional; safety checks pass through if no server is reachable.
+
+    ```bash
+    python -m aerpawlib --script my_mission.py --api-version v2 --safety-checker-port 14580
+    ```
+  </Step>
+
+  <Step title="Update type and plan imports">
+    `Coordinate` and `VectorNED` moved from `aerpawlib.v1.util` to `aerpawlib.v2.types`. Plan helpers moved from `aerpawlib.v1.util` to `aerpawlib.v2.plan`. The function signatures are unchanged.
+
+    | v1 | v2 |
+    |----|----|
+    | `from aerpawlib.v1.util import Coordinate, VectorNED` | `from aerpawlib.v2.types import Coordinate, VectorNED` |
+    | `from aerpawlib.v1.util import read_from_plan` | `from aerpawlib.v2.plan import read_from_plan` |
+    | `from aerpawlib.v1.util import read_from_plan_complete` | `from aerpawlib.v2.plan import read_from_plan_complete` |
+    | `from aerpawlib.v1.util import get_location_from_waypoint` | `from aerpawlib.v2.plan import get_location_from_waypoint` |
+  </Step>
+
+  <Step title="Pass --api-version v2 to the CLI">
+    The aerpawlib CLI defaults to the v1 API. Add `--api-version v2` when launching v2 scripts.
+
+    <Tabs>
+      <Tab title="v1">
+        ```bash
+        python -m aerpawlib --script my_mission.py --connection udp://:14540
+        ```
+      </Tab>
+      <Tab title="v2">
+        ```bash
+        python -m aerpawlib --script my_mission.py --connection udp://:14540 --api-version v2
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+---
+
+## New v2-only features
+
+These features do not exist in v1. You can adopt them incrementally after migrating.
+
+### `@at_init` decorator
+
+Run one or more methods once during initialization, before arming, in a `StateMachine` or `ZmqStateMachine`.
+
+```python
+from aerpawlib.v2 import StateMachine, state, at_init, Drone
+
+class MyMission(StateMachine):
+    @at_init
+    async def setup(self, drone: Drone):
+        # runs before the first state, before arming
+        print("Initializing...")
+
+    @state(name="fly", first=True)
+    async def fly(self, drone: Drone):
+        await drone.takeoff(altitude=10)
+        return None
+```
+
+### `VehicleTask` — non-blocking goto
+
+`VehicleTask` lets you start a `goto_coordinates` command and continue executing other logic while the vehicle moves, with optional progress queries and cancellation.
+
+```python
+from aerpawlib.v2 import Drone, VectorNED
+
+task = await drone.goto_coordinates(drone.position + VectorNED(50, 0), blocking=False)
+while not task.done():
+    print(f"Distance remaining: {await task.distance_remaining()}m")
+    await asyncio.sleep(1)
+```
+
+### Typed exceptions
+
+v2 exceptions carry a machine-readable `code` string and a `severity` level (`"warning"`, `"error"`, `"critical"`), making structured error handling easier.
+
+```python
+from aerpawlib.v2 import TakeoffError, NavigationError
+
+try:
+    await drone.takeoff(altitude=10)
+except TakeoffError as e:
+    print(e.code)      # e.g. "TAKEOFF_ERROR"
+    print(e.severity)  # e.g. "error"
+```
+
+All v2 exceptions inherit from `AerpawlibError`, so existing broad `except` blocks continue to work.
+
+### `MockVehicle` for unit tests
+
+v2 ships a lightweight `MockVehicle` that satisfies `VehicleProtocol` without a real connection or SITL instance.
+
+```python
+from aerpawlib.v2 import MockVehicle
+from aerpawlib.v2.types import Coordinate
+
+vehicle = MockVehicle(position=Coordinate(35.727436, -78.696587, 0))
+assert vehicle.connected
+assert not vehicle.armed
+```
+
+### Config dataclasses
+
+`BasicRunnerConfig`, `StateMachineConfig`, and `ZmqStateMachineConfig` let you declare runner structure as pure data rather than relying on decorator side-effects during class construction.
+
+```python
+from aerpawlib.v2 import StateMachine, StateMachineConfig, StateSpec, Drone
+
+class MyMission(StateMachine):
+    config = StateMachineConfig(
+        initial_state="preflight",
+        states=[
+            StateSpec(name="preflight", method_name="preflight", first=True),
+            StateSpec(name="fly", method_name="fly"),
+        ],
+    )
+
+    async def preflight(self, drone: Drone):
+        return "fly"
+
+    async def fly(self, drone: Drone):
+        await drone.takeoff(altitude=10)
+        return None
+```
