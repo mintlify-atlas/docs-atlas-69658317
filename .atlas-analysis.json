@@ -1,0 +1,136 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "aerpawlib",
+  "projectDescription": "A Python library for controlling drones and ground vehicles within the AERPAW platform, providing async mission execution, state machines, safety checking, and multi-vehicle coordination via ArduPilot/MAVSDK.",
+  "theme": "palm",
+  "primaryColor": "#34498e",
+  "lightColor": "#7782b0",
+  "darkColor": "#d9e2d4",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/running-scripts",
+              "guides/mission-patterns",
+              "guides/multi-vehicle",
+              "guides/safety-checker",
+              "guides/external-processes",
+              "guides/aerpaw-platform",
+              "guides/sitl-development"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/overview",
+              "examples/basic-flight",
+              "examples/state-machine",
+              "examples/zmq-coordination"
+            ]
+          },
+          {
+            "group": "Migration",
+            "pages": [
+              "migration/v1-to-v2",
+              "migration/feature-parity"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "v1 API",
+            "pages": [
+              "api/v1/overview",
+              "api/v1/vehicles",
+              "api/v1/runners",
+              "api/v1/types",
+              "api/v1/safety",
+              "api/v1/zmq"
+            ]
+          },
+          {
+            "group": "v2 API",
+            "pages": [
+              "api/v2/overview",
+              "api/v2/vehicles",
+              "api/v2/runners",
+              "api/v2/types",
+              "api/v2/safety",
+              "api/v2/zmq",
+              "api/v2/plan",
+              "api/v2/testing",
+              "api/v2/exceptions"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Unified async vehicle control for drones and rovers via ArduPilot/MAVSDK",
+    "Scriptable missions with BasicRunner and StateMachine patterns",
+    "Multi-vehicle ZMQ coordination for leader/follower and swarm scenarios",
+    "Built-in geofence safety checker with KML polygon support",
+    "QGroundControl .plan file loading for pre-planned trajectories",
+    "Non-blocking VehicleTask commands with progress tracking and cancellation",
+    "AERPAW platform integration with OEO logging and checkpoints",
+    "v1/v2 dual API with migration path from legacy DroneKit scripts"
+  ],
+  "publicApiSurface": [
+    "Drone",
+    "Rover",
+    "Vehicle",
+    "DummyVehicle",
+    "MockVehicle",
+    "Coordinate",
+    "VectorNED",
+    "Battery",
+    "GPSInfo",
+    "Attitude",
+    "VehicleTask",
+    "BasicRunner",
+    "StateMachine",
+    "ZmqStateMachine",
+    "Runner",
+    "BasicRunnerConfig",
+    "StateMachineConfig",
+    "ZmqStateMachineConfig",
+    "@entrypoint",
+    "@state",
+    "@timed_state",
+    "@background",
+    "@at_init",
+    "@expose_zmq",
+    "@expose_field_zmq",
+    "SafetyCheckerServer",
+    "SafetyCheckerClient",
+    "ExternalProcess",
+    "AERPAW_Platform",
+    "read_from_plan",
+    "read_from_plan_complete",
+    "read_geofence",
+    "inside",
+    "do_intersect",
+    "run_zmq_proxy",
+    "check_zmq_proxy_reachable",
+    "AerpawlibError",
+    "TakeoffError",
+    "NavigationError",
+    "ConnectionTimeoutError"
+  ]
+}
